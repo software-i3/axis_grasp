@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>axis_grasp</name>
+  <version>0.2.0</version>
+  <description>Optimized OpenCV-based axis voting and grasp proposal pipeline.</description>
+  <maintainer email="maintainer@example.com">axis_grasp maintainer</maintainer>
+  <license>Proprietary</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>geometry_msgs</depend>
+  <depend>roscpp</depend>
+  <depend>sensor_msgs</depend>
+  <build_depend>libopencv-dev</build_depend>
+  <exec_depend>libopencv-dev</exec_depend>
+  <export/>
+</package>
