@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstdint>
 #include <vector>
 
@@ -137,6 +138,57 @@ TEST(ComponentFilterTest, RemovesLongStraightBand) {
   double mass = 0.0;
   for (float value : result.value().data()) mass += value;
   EXPECT_DOUBLE_EQ(mass, 0.0);
+}
+
+TEST(ComponentFilterTest, ZeroesEveryFragmentOfASplitStraightRope) {
+  // A low-value gap near an attachment point splits the rope into two raw
+  // coherent>0 fragments that closing bridges into a single detection. Clearing
+  // only the fragment holding the band's first raster-scanned pixel left the
+  // rest of the rope in the output.
+  Image<float> coherent(35, 120, 0.0F);
+  for (int y = 15; y <= 19; ++y) {
+    for (int x = 5; x <= 104; ++x) coherent(y, x) = 1.0F;
+  }
+  for (int y = 15; y <= 19; ++y) {
+    for (int x = 54; x <= 57; ++x) coherent(y, x) = 0.0F;
+  }
+  Result<Image<float>> result = RemoveStraightComponents(coherent, 9);
+  ASSERT_TRUE(result.ok()) << result.status().message;
+  double mass = 0.0;
+  for (float value : result.value().data()) mass += value;
+  EXPECT_DOUBLE_EQ(mass, 0.0);
+}
+
+TEST(ComponentFilterTest, RemovesStraightRopeMergedWithThinClutter) {
+  // Closing can bridge a straight rope into unrelated nearby clutter. The
+  // fragment is a minority of the band's pixels but a large share of its
+  // skeleton, so a whole-population PCA reads the merged shape as bent and
+  // spares the rope; RANSAC still recovers the rope line as the consensus.
+  Image<float> coherent(60, 120, 0.0F);
+  for (int y = 15; y <= 19; ++y) {
+    for (int x = 5; x <= 104; ++x) coherent(y, x) = 1.0F;
+  }
+  for (int y = 20; y <= 39; ++y) coherent(y, 97) = 1.0F;
+  Result<Image<float>> result = RemoveStraightComponents(coherent, 1);
+  ASSERT_TRUE(result.ok()) << result.status().message;
+  double mass = 0.0;
+  for (float value : result.value().data()) mass += value;
+  EXPECT_DOUBLE_EQ(mass, 0.0);
+}
+
+TEST(ComponentFilterTest, KeepsShortCurvedFragment) {
+  // A short chord of a loop is straight over its own span. The skeleton length
+  // gate keeps it, where the baseline deleted it as if it were rope.
+  Image<float> coherent(40, 60, 0.0F);
+  for (int x = 0; x <= 40; ++x) {
+    const int dy = static_cast<int>(std::lround(0.0075 * (x - 20) * (x - 20)));
+    for (int y = 20 + dy - 1; y <= 20 + dy + 1; ++y) coherent(y, x) = 1.0F;
+  }
+  Result<Image<float>> result = RemoveStraightComponents(coherent, 1);
+  ASSERT_TRUE(result.ok()) << result.status().message;
+  double mass = 0.0;
+  for (float value : result.value().data()) mass += value;
+  EXPECT_GT(mass, 0.0);
 }
 
 }  // namespace

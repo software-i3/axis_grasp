@@ -9,6 +9,8 @@
   <depend>geometry_msgs</depend>
   <depend>roscpp</depend>
   <depend>sensor_msgs</depend>
+  <!-- Only needed when built with AXIS_GRASP_WITH_DETECTIONS (the default). -->
+  <depend>bx_msgs</depend>
   <build_depend>libopencv-dev</build_depend>
   <exec_depend>libopencv-dev</exec_depend>
   <export/>

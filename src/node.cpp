@@ -2,10 +2,12 @@
 #include <geometry_msgs/PoseArray.h>
 #include <ros/ros.h>
 
+#include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
-#include <cstdint>
 #include <string>
+#include <vector>
 
 #include "axis_grasp/adapters/adapter_utils.h"
 #include "axis_grasp/adapters/data_source.h"
@@ -24,8 +26,14 @@ int main(int argc, char** argv) {
   std::string calibration_path;
   std::string strategy_name = "camera";
   double sync_slop_seconds = 0.03;
+  double mask_wait_timeout_seconds = 0.10;
   int native_width = 1600;
   int native_height = 1200;
+  std::string label_source_name = "mask";
+  std::string detections_topic = "/ikan/vision/ml/detections";
+  std::string detector_name;
+  std::vector<std::string> detection_classes;
+  int min_confidence = 0;
   private_node.param("disparity_topic", disparity_topic, disparity_topic);
   private_node.param("label_topic", label_topic, label_topic);
   private_node.param("output_topic", output_topic, output_topic);
@@ -33,12 +41,42 @@ int main(int argc, char** argv) {
   private_node.param("strategy", strategy_name, strategy_name);
   private_node.param("sync_slop_seconds", sync_slop_seconds,
                      sync_slop_seconds);
+  private_node.param("mask_wait_timeout_seconds", mask_wait_timeout_seconds,
+                     mask_wait_timeout_seconds);
   private_node.param("native_width", native_width, native_width);
   private_node.param("native_height", native_height, native_height);
+  private_node.param("label_source", label_source_name, label_source_name);
+  private_node.param("detections_topic", detections_topic, detections_topic);
+  private_node.param("detector_name", detector_name, detector_name);
+  private_node.param("detection_classes", detection_classes,
+                     detection_classes);
+  private_node.param("min_confidence", min_confidence, min_confidence);
   if (calibration_path.empty()) {
     ROS_FATAL("~calibration is required");
     return 1;
   }
+  if (!std::isfinite(sync_slop_seconds) || sync_slop_seconds < 0.0) {
+    ROS_FATAL("~sync_slop_seconds must be finite and non-negative");
+    return 1;
+  }
+  if (!std::isfinite(mask_wait_timeout_seconds) ||
+      mask_wait_timeout_seconds < 0.0) {
+    ROS_FATAL("~mask_wait_timeout_seconds must be finite and non-negative");
+    return 1;
+  }
+  axis_grasp::Result<axis_grasp_ros1::LabelSource> label_source =
+      axis_grasp_ros1::ParseLabelSource(label_source_name);
+  if (!label_source.ok()) {
+    ROS_FATAL_STREAM(label_source.status().message);
+    return 1;
+  }
+#ifndef AXIS_GRASP_WITH_DETECTIONS
+  if (label_source.value() == axis_grasp_ros1::LabelSource::kDetections) {
+    ROS_FATAL("label_source is 'detections' but axis_grasp was built without "
+              "bx_msgs; rebuild with -DAXIS_GRASP_WITH_DETECTIONS=ON");
+    return 1;
+  }
+#endif
 
   axis_grasp::PipelineConfig config;
   private_node.param("r_min", config.voting.radius_min,
@@ -102,15 +140,38 @@ int main(int argc, char** argv) {
   }
   config.grasp.strategy = strategy.value();
 
+  axis_grasp_ros1::DetectionFilterConfig detection_filter;
+  detection_filter.detector_name = detector_name;
+  detection_filter.classes = detection_classes;
+  detection_filter.min_confidence = min_confidence;
+
   auto source = std::make_unique<axis_grasp_ros1::RosDataSource>(
-      node, disparity_topic, label_topic, sync_slop_seconds);
+      node, disparity_topic, label_topic, sync_slop_seconds,
+      mask_wait_timeout_seconds, label_source.value(), detections_topic,
+      detection_filter);
   ros::Publisher publisher =
       node.advertise<geometry_msgs::PoseArray>(output_topic, 1);
   axis_grasp_ros1::RosLogger logger;
   std::optional<axis_grasp::Pipeline> pipeline;
 
+  std::string label_description =
+      label_topic + " (fallback_timeout=" +
+      std::to_string(mask_wait_timeout_seconds) + "s)";
+  if (label_source.value() == axis_grasp_ros1::LabelSource::kDetections) {
+    label_description =
+        detections_topic + " (detector='" +
+        (detector_name.empty() ? std::string("*") : detector_name) +
+        "', classes=" +
+        (detection_classes.empty()
+             ? std::string("*")
+             : std::to_string(detection_classes.size()) + " listed") +
+        ", min_confidence=" + std::to_string(min_confidence) +
+        ", fallback_timeout=" + std::to_string(mask_wait_timeout_seconds) +
+        "s)";
+  }
   ROS_INFO_STREAM("axis_grasp ready: disparity=" << disparity_topic
-                  << " label=" << label_topic << " output=" << output_topic
+                  << " label_source=" << label_source_name << " from "
+                  << label_description << " output=" << output_topic
                   << " strategy=" << strategy_name
                   << " roi_crop=" << (config.enable_roi_crop ? "on" : "off"));
 

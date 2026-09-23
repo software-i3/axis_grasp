@@ -1,5 +1,7 @@
 #include "axis_grasp/adapters/dataset_source.h"
 
+#include "axis_grasp/adapters/polygon_mask.h"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -147,28 +149,6 @@ T ReadElement(const NpyData& data, std::size_t index) {
   return value;
 }
 
-bool PointOnSegment(double px, double py, const Vec2d& a, const Vec2d& b) {
-  const double cross = (px - a.x) * (b.y - a.y) -
-                       (py - a.y) * (b.x - a.x);
-  if (std::abs(cross) > 1e-9) return false;
-  return px >= std::min(a.x, b.x) && px <= std::max(a.x, b.x) &&
-         py >= std::min(a.y, b.y) && py <= std::max(a.y, b.y);
-}
-
-bool PointInPolygon(double x, double y, const std::vector<Vec2d>& polygon) {
-  bool inside = false;
-  for (std::size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
-    if (PointOnSegment(x, y, polygon[j], polygon[i])) return true;
-    const bool crosses = ((polygon[i].y > y) != (polygon[j].y > y)) &&
-                         (x < (polygon[j].x - polygon[i].x) *
-                                      (y - polygon[i].y) /
-                                      (polygon[j].y - polygon[i].y) +
-                                  polygon[i].x);
-    if (crosses) inside = !inside;
-  }
-  return inside;
-}
-
 Result<Image<std::uint8_t>> LoadPolygonMask(
     const std::filesystem::path& path, int width, int height) {
   std::ifstream stream(path);
@@ -190,13 +170,7 @@ Result<Image<std::uint8_t>> LoadPolygonMask(
                        static_cast<double>(
                            static_cast<int>(tokens[i + 1] * height))});
   }
-  Image<std::uint8_t> mask(height, width, 0);
-  for (int y = 0; y < height; ++y) {
-    for (int x = 0; x < width; ++x) {
-      mask(y, x) = PointInPolygon(x, y, polygon) ? 1 : 0;
-    }
-  }
-  return mask;
+  return RasterizePolygons({polygon}, width, height);
 }
 
 }  // namespace

@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -67,6 +68,186 @@ std::vector<Vec2i> PixelsForLabel(const Image<int>& labels, int label,
     }
   }
   return points;
+}
+
+// Deterministic generator for the RANSAC line fit. The plane fit in
+// grasp_proposal.cpp carries a numpy-compatible PCG64 because it has to match a
+// Python reference bit for bit; this filter deliberately departs from its
+// Python original, so all it needs is a reproducible stream from a configured
+// seed.
+class SplitMix64 {
+ public:
+  explicit SplitMix64(std::uint32_t seed)
+      : state_(static_cast<std::uint64_t>(seed) + 0x9e3779b97f4a7c15ULL) {}
+
+  std::uint64_t Next() {
+    state_ += 0x9e3779b97f4a7c15ULL;
+    std::uint64_t value = state_;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebULL;
+    return value ^ (value >> 31);
+  }
+
+  // Uniform over [0, exclusive_maximum); the rejection loop removes the bias a
+  // bare remainder would carry.
+  std::uint32_t Bounded(std::uint32_t exclusive_maximum) {
+    if (exclusive_maximum <= 1) return 0;
+    const std::uint32_t limit =
+        std::numeric_limits<std::uint32_t>::max() -
+        (std::numeric_limits<std::uint32_t>::max() % exclusive_maximum);
+    std::uint32_t value = static_cast<std::uint32_t>(Next());
+    while (value >= limit) value = static_cast<std::uint32_t>(Next());
+    return value % exclusive_maximum;
+  }
+
+ private:
+  std::uint64_t state_;
+};
+
+// Two distinct indices drawn uniformly without replacement. There is no
+// permutation step here, unlike NumpyChoiceThree: a line through two points
+// does not care which point is visited first.
+std::array<std::size_t, 2> SampleTwoIndices(std::size_t population,
+                                            SplitMix64* generator) {
+  std::array<std::size_t, 2> result{};
+  result[0] = generator->Bounded(static_cast<std::uint32_t>(population - 1));
+  std::size_t second =
+      generator->Bounded(static_cast<std::uint32_t>(population - 2));
+  if (second >= result[0]) ++second;
+  result[1] = second;
+  return result;
+}
+
+struct Pca2d {
+  double mean_x = 0.0;
+  double mean_y = 0.0;
+  double lambda_max = 0.0;
+  double lambda_min = 0.0;
+  double direction_x = 0.0;
+  double direction_y = 0.0;
+};
+
+// Covariance eigen-decomposition of a 2-D point set, normalized by the point
+// count. Shared by the elongation gate, which reads the eigenvalue ratio, and
+// the RANSAC refit, which reads the major-axis direction.
+Pca2d ComputePca2d(const std::vector<Vec2i>& points) {
+  Pca2d result;
+  if (points.empty()) return result;
+  const double count = static_cast<double>(points.size());
+  for (const Vec2i& point : points) {
+    result.mean_x += point.x;
+    result.mean_y += point.y;
+  }
+  result.mean_x /= count;
+  result.mean_y /= count;
+  double cxx = 0.0;
+  double cxy = 0.0;
+  double cyy = 0.0;
+  for (const Vec2i& point : points) {
+    const double dx = point.x - result.mean_x;
+    const double dy = point.y - result.mean_y;
+    cxx += dx * dx;
+    cxy += dx * dy;
+    cyy += dy * dy;
+  }
+  cxx /= count;
+  cxy /= count;
+  cyy /= count;
+  const double trace = cxx + cyy;
+  const double discriminant =
+      std::sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
+  result.lambda_max = 0.5 * (trace + discriminant);
+  result.lambda_min = 0.5 * (trace - discriminant);
+  if (cxy != 0.0) {
+    result.direction_x = result.lambda_max - cyy;
+    result.direction_y = cxy;
+  } else if (cxx >= cyy) {
+    result.direction_x = 1.0;
+  } else {
+    result.direction_y = 1.0;
+  }
+  const double norm = std::hypot(result.direction_x, result.direction_y);
+  if (norm > 0.0) {
+    result.direction_x /= norm;
+    result.direction_y /= norm;
+  }
+  return result;
+}
+
+double PerpendicularDistance(const Pca2d& line, double x, double y) {
+  return std::abs(line.direction_x * (y - line.mean_y) -
+                  line.direction_y * (x - line.mean_x));
+}
+
+struct LineFit {
+  Pca2d line;
+  std::vector<Vec2i> inliers;
+  double inlier_fraction = 0.0;
+};
+
+// RANSAC over 2-point line hypotheses, shaped like FitPlaneRansac in
+// grasp_proposal.cpp: sample, score, keep the best consensus, then refit the
+// direction by PCA over the winning inliers. Returns nullopt when the consensus
+// covers less than min_inlier_fraction of the points.
+std::optional<LineFit> FitLineRansac(const std::vector<Vec2i>& points,
+                                     double distance_threshold, int iterations,
+                                     double min_inlier_fraction,
+                                     std::uint32_t seed) {
+  if (points.size() < 2) return std::nullopt;
+  if (points.size() > std::numeric_limits<std::uint32_t>::max()) {
+    return std::nullopt;
+  }
+  SplitMix64 generator(seed);
+  std::size_t best_count = 0;
+  std::size_t best_first = 0;
+  std::size_t best_second = 0;
+  for (int iteration = 0; iteration < iterations; ++iteration) {
+    const std::array<std::size_t, 2> sample =
+        SampleTwoIndices(points.size(), &generator);
+    const Vec2i& a = points[sample[0]];
+    const Vec2i& b = points[sample[1]];
+    const double dx = static_cast<double>(b.x - a.x);
+    const double dy = static_cast<double>(b.y - a.y);
+    const double norm = std::hypot(dx, dy);
+    if (norm <= 0.0) continue;
+    const double vx = dx / norm;
+    const double vy = dy / norm;
+    std::size_t count = 0;
+    for (const Vec2i& point : points) {
+      if (std::abs(vx * (point.y - a.y) - vy * (point.x - a.x)) <=
+          distance_threshold) {
+        ++count;
+      }
+    }
+    if (count > best_count) {
+      best_count = count;
+      best_first = sample[0];
+      best_second = sample[1];
+    }
+  }
+  if (best_count < 2) return std::nullopt;
+  const Vec2i& anchor = points[best_first];
+  const Vec2i& second = points[best_second];
+  const double dx = static_cast<double>(second.x - anchor.x);
+  const double dy = static_cast<double>(second.y - anchor.y);
+  const double norm = std::hypot(dx, dy);
+  if (norm <= 0.0) return std::nullopt;
+  const double vx = dx / norm;
+  const double vy = dy / norm;
+  std::vector<Vec2i> inliers;
+  inliers.reserve(best_count);
+  for (const Vec2i& point : points) {
+    if (std::abs(vx * (point.y - anchor.y) - vy * (point.x - anchor.x)) <=
+        distance_threshold) {
+      inliers.push_back(point);
+    }
+  }
+  const double fraction =
+      static_cast<double>(inliers.size()) / static_cast<double>(points.size());
+  if (inliers.size() < 2 || fraction < min_inlier_fraction) {
+    return std::nullopt;
+  }
+  return LineFit{ComputePca2d(inliers), std::move(inliers), fraction};
 }
 
 }  // namespace
@@ -148,34 +329,9 @@ Result<Image<float>> RemoveStraightComponents(
         PixelsForLabel(detected.labels, label, x0, y0, width, height);
     if (band.empty()) continue;
 
-    double mean_x = 0.0;
-    double mean_y = 0.0;
-    for (const Vec2i& point : band) {
-      mean_x += point.x;
-      mean_y += point.y;
-    }
-    mean_x /= band.size();
-    mean_y /= band.size();
-    double cxx = 0.0;
-    double cxy = 0.0;
-    double cyy = 0.0;
-    for (const Vec2i& point : band) {
-      const double dx = point.x - mean_x;
-      const double dy = point.y - mean_y;
-      cxx += dx * dx;
-      cxy += dx * dy;
-      cyy += dy * dy;
-    }
-    cxx /= band.size();
-    cxy /= band.size();
-    cyy /= band.size();
-    const double trace = cxx + cyy;
-    const double discriminant =
-        std::sqrt((cxx - cyy) * (cxx - cyy) + 4.0 * cxy * cxy);
-    const double lambda_max = 0.5 * (trace + discriminant);
-    const double lambda_min = 0.5 * (trace - discriminant);
-    if (lambda_min <= 1e-12 ||
-        lambda_max / lambda_min < config.elongation_ratio) {
+    const Pca2d band_pca = ComputePca2d(band);
+    if (band_pca.lambda_min <= 1e-12 ||
+        band_pca.lambda_max / band_pca.lambda_min < config.elongation_ratio) {
       continue;
     }
 
@@ -192,74 +348,62 @@ Result<Image<float>> RemoveStraightComponents(
         if (skeleton(y, x) != 0) skeleton_points.push_back({x, y});
       }
     }
-    if (skeleton_points.size() < 8) continue;
+    // A short skeleton is the chord of something curved, not a rope line: a
+    // curve is straight over a short enough span, so these fragments used to be
+    // deleted as rope along with the real thing.
+    if (skeleton_points.size() <
+        static_cast<std::size_t>(config.min_skeleton_pixels)) {
+      continue;
+    }
 
-    double skeleton_mean_x = 0.0;
-    double skeleton_mean_y = 0.0;
-    for (const Vec2i& point : skeleton_points) {
-      skeleton_mean_x += point.x;
-      skeleton_mean_y += point.y;
-    }
-    skeleton_mean_x /= skeleton_points.size();
-    skeleton_mean_y /= skeleton_points.size();
-    double ssxx = 0.0;
-    double ssxy = 0.0;
-    double ssyy = 0.0;
-    for (const Vec2i& point : skeleton_points) {
-      const double dx = point.x - skeleton_mean_x;
-      const double dy = point.y - skeleton_mean_y;
-      ssxx += dx * dx;
-      ssxy += dx * dy;
-      ssyy += dy * dy;
-    }
-    const double skeleton_trace = ssxx + ssyy;
-    const double skeleton_discriminant =
-        std::sqrt((ssxx - ssyy) * (ssxx - ssyy) + 4.0 * ssxy * ssxy);
-    const double skeleton_lambda_max =
-        0.5 * (skeleton_trace + skeleton_discriminant);
-    double vx = 0.0;
-    double vy = 0.0;
-    if (ssxy != 0.0) {
-      vx = skeleton_lambda_max - ssyy;
-      vy = ssxy;
-    } else if (ssxx >= ssyy) {
-      vx = 1.0;
-    } else {
-      vy = 1.0;
-    }
-    const double axis_norm = std::hypot(vx, vy);
-    vx /= axis_norm;
-    vy /= axis_norm;
+    const std::optional<LineFit> fit =
+        FitLineRansac(skeleton_points, config.ransac_distance_pixels,
+                      config.ransac_iterations,
+                      config.ransac_min_inlier_fraction, config.ransac_seed);
+    if (!fit.has_value()) continue;
 
+    // Both scales are measured from the consensus set alone, so a fragment
+    // merged into the band cannot widen the tolerance that is supposed to
+    // describe the rope.
     std::vector<double> skeleton_distance;
-    skeleton_distance.reserve(skeleton_points.size());
-    for (const Vec2i& point : skeleton_points) {
-      skeleton_distance.push_back(std::abs(
-          vx * (point.y - skeleton_mean_y) -
-          vy * (point.x - skeleton_mean_x)));
+    skeleton_distance.reserve(fit->inliers.size());
+    for (const Vec2i& point : fit->inliers) {
+      skeleton_distance.push_back(
+          PerpendicularDistance(fit->line, point.x, point.y));
     }
     const double residual_95 =
         internal::Percentile(std::move(skeleton_distance), 95.0);
     std::vector<double> band_distance;
     band_distance.reserve(band.size());
     for (const Vec2i& point : band) {
-      const double px = point.x + kPadding;
-      const double py = point.y + kPadding;
-      band_distance.push_back(std::abs(
-          vx * (py - skeleton_mean_y) - vy * (px - skeleton_mean_x)));
+      const double distance = PerpendicularDistance(
+          fit->line, point.x + kPadding, point.y + kPadding);
+      if (distance <= config.ransac_distance_pixels) {
+        band_distance.push_back(distance);
+      }
     }
-    const double band_width = internal::Percentile(std::move(band_distance), 95.0);
+    if (band_distance.empty()) continue;
+    const double band_width =
+        internal::Percentile(std::move(band_distance), 95.0);
     if (residual_95 >
         std::max(config.residual_pixels,
                  config.residual_fraction * band_width)) {
       continue;
     }
 
-    const Vec2i first = band.front();
-    const int full_x = x0 + first.x;
-    const int full_y = y0 + first.y;
-    const int positive_label = positive_components.labels(full_y, full_x);
-    if (positive_label > 0) {
+    // Zero every positive-mask component the band touches, not just the one
+    // holding band.front(). A component that is correctly classified as
+    // straight can still arrive as several raw coherent>0 fragments -- a
+    // low-value gap near an attachment point splits it, and only the closing
+    // step bridges them for classification. Clearing the first raster-scanned
+    // fragment left the rest of the visible rope in the output.
+    std::vector<std::uint8_t> cleared(positive_components.area.size(), 0);
+    for (const Vec2i& point : band) {
+      const int full_x = x0 + point.x;
+      const int full_y = y0 + point.y;
+      const int positive_label = positive_components.labels(full_y, full_x);
+      if (positive_label <= 0 || cleared[positive_label] != 0) continue;
+      cleared[positive_label] = 1;
       for (std::size_t i = 0; i < output.size(); ++i) {
         if (positive_components.labels[i] == positive_label) output[i] = 0.0F;
       }

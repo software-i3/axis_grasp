@@ -1,9 +1,29 @@
 <launch>
   <arg name="config" default="$(find axis_grasp)/config/default.yaml"/>
   <arg name="calibration" default="$(find axis_grasp)/config/calibration_underwater.json"/>
+
+  <!-- Optional overrides for the label source. Left empty, the values in
+       `config` apply. Use these to switch to the DetectedInstances mask source
+       without editing the YAML:
+         roslaunch axis_grasp axis_grasp.launch label_source:=detections \
+           detector_name:=sim_front_cam_seg
+       `detection_classes` is a list, so set it in the YAML rather than here. -->
+  <arg name="label_source" default=""/>
+  <arg name="detections_topic" default=""/>
+  <arg name="detector_name" default=""/>
+  <arg name="min_confidence" default=""/>
+
   <node pkg="axis_grasp" type="axis_grasp_node" name="axis_grasp_node"
         output="screen" required="true">
     <rosparam command="load" file="$(arg config)"/>
     <param name="calibration" value="$(arg calibration)"/>
+    <param name="label_source" value="$(arg label_source)"
+           if="$(eval arg('label_source') != '')"/>
+    <param name="detections_topic" value="$(arg detections_topic)"
+           if="$(eval arg('detections_topic') != '')"/>
+    <param name="detector_name" value="$(arg detector_name)"
+           if="$(eval arg('detector_name') != '')"/>
+    <param name="min_confidence" value="$(arg min_confidence)"
+           if="$(eval arg('min_confidence') != '')"/>
   </node>
 </launch>

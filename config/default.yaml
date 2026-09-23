@@ -2,6 +2,31 @@ disparity_topic: /disparity
 label_topic: /label
 output_topic: /grasp_poses_by_pipeline
 sync_slop_seconds: 0.03
+# Grace period, measured on a local steady clock, that a disparity waits for a
+# usable ROI before it is processed over the whole frame instead. Applies to
+# either label_source, so the node always publishes whether or not a label or
+# detections topic is present. Set to 0 for fallback after the first
+# callback-processing pass.
+mask_wait_timeout_seconds: 0.10
+
+# Where the ROI mask comes from.
+#   mask        a mono8 label image on `label_topic`, co-published with the
+#               disparity frame.
+#   detections  polygon contours from bx_msgs/DetectedInstances on
+#               `detections_topic`, rasterized onto the disparity resolution.
+label_source: mask
+
+# Only used when label_source is `detections`.
+detections_topic: /ikan/vision/ml/detections
+# Several detectors share that topic (sim_sonar_seg, sim_front_cam_seg), so set
+# this to the one whose contours should become the ROI. Empty accepts any.
+detector_name: ""
+# Accepted DetectedInstance.name values. Empty accepts every class.
+detection_classes: []
+# DetectedInstance.confidence is a percentage where 0 means "not available",
+# so 0 accepts everything.
+min_confidence: 0
+
 native_width: 1600
 native_height: 1200
 strategy: camera
@@ -17,8 +42,8 @@ bilateral_sigma_color: 75.0
 bilateral_sigma_space: 75.0
 accumulator_percentile: 30.0
 close_kernel: 9
-top_components: 3
-spacing_m: 0.005
+top_components: 2
+spacing_m: 0.001
 dense_spacing_pixels: 3.5
 edge_margin_pixels: 6
 post_skeleton_dilation_pixels: 2
