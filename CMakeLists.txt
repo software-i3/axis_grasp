@@ -14,7 +14,7 @@ option(AXIS_GRASP_BUILD_DATASET "Build the offline dataset executable" ON)
 option(AXIS_GRASP_BUILD_SOCKET "Build the uvgRTP receiver executable" OFF)
 option(AXIS_GRASP_BUILD_TESTS "Build core tests when GoogleTest is available" ON)
 option(AXIS_GRASP_WITH_DETECTIONS
-  "Accept bx_msgs/DetectedInstances contours as an ROI mask source" ON)
+  "Accept bx_msgs input: DetectedInstances contours as an ROI mask source, and DepthImage as a range source" ON)
 
 # One find_package call: a second one replaces catkin_INCLUDE_DIRS rather than
 # adding to it, which silently drops the ROS include directories.
@@ -23,7 +23,9 @@ if(AXIS_GRASP_WITH_DETECTIONS)
   list(APPEND AXIS_GRASP_CATKIN_COMPONENTS bx_msgs)
 endif()
 find_package(catkin REQUIRED COMPONENTS ${AXIS_GRASP_CATKIN_COMPONENTS})
-find_package(OpenCV REQUIRED COMPONENTS core imgproc)
+# imgcodecs carries cv::imdecode, which the depth input mode uses to unpack the
+# PNG inside bx_msgs/DepthImage.depth_data. Same reason as mine_centering.
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
 
 catkin_package(
   INCLUDE_DIRS include core/include adapters/common/include
@@ -41,7 +43,9 @@ target_include_directories(axis_grasp_mask_pairing PUBLIC include)
 target_compile_features(axis_grasp_mask_pairing PUBLIC cxx_std_17)
 
 add_executable(axis_grasp_node src/node.cpp src/ros_data_source.cpp)
-target_include_directories(axis_grasp_node PRIVATE include ${catkin_INCLUDE_DIRS})
+# OpenCV's headers are not part of catkin_INCLUDE_DIRS here, and the adapter
+# includes opencv2/imgcodecs.hpp directly.
+target_include_directories(axis_grasp_node PRIVATE include ${catkin_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(axis_grasp_node PRIVATE axis_grasp_adapter_common axis_grasp_core axis_grasp_mask_pairing ${catkin_LIBRARIES})
 add_dependencies(axis_grasp_node ${catkin_EXPORTED_TARGETS})
 if(AXIS_GRASP_WITH_DETECTIONS)

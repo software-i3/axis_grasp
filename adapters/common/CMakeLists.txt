@@ -13,6 +13,7 @@ endif()
 
 add_library(axis_grasp_adapter_common STATIC
   src/adapter_utils.cpp
+  src/depth_to_disparity.cpp
   src/polygon_mask.cpp
 )
 target_include_directories(axis_grasp_adapter_common PUBLIC include)
@@ -28,6 +29,13 @@ if(BUILD_TESTING AND AXIS_GRASP_BUILD_TESTS)
     )
     include(GoogleTest)
     gtest_discover_tests(axis_grasp_polygon_mask_tests)
+
+    add_executable(axis_grasp_depth_to_disparity_tests
+      tests/depth_to_disparity_test.cpp)
+    target_link_libraries(axis_grasp_depth_to_disparity_tests
+      PRIVATE axis_grasp_adapter_common GTest::gtest_main
+    )
+    gtest_discover_tests(axis_grasp_depth_to_disparity_tests)
   else()
     message(WARNING "GoogleTest was not found; polygon mask tests are present but will not be built")
   endif()

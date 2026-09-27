@@ -16,6 +16,9 @@
 #include <utility>
 #include <vector>
 
+#include <opencv2/imgcodecs.hpp>
+
+#include "axis_grasp/adapters/adapter_utils.h"
 #include "axis_grasp/adapters/polygon_mask.h"
 #include "axis_grasp/mask_pairing.h"
 
@@ -133,6 +136,24 @@ axis_grasp::Result<LabelSource> ParseLabelSource(const std::string& value) {
       "label_source must be 'mask' or 'detections', got '" + value + "'");
 }
 
+axis_grasp::Result<InputKind> ParseInputKind(const std::string& value) {
+  if (value.empty() || value == "disparity") return InputKind::kDisparity;
+  if (value == "depth") return InputKind::kDepth;
+  return axis_grasp::Status::Error(
+      axis_grasp::ErrorCode::kInvalidArgument,
+      "input_kind must be 'disparity' or 'depth', got '" + value + "'");
+}
+
+const char* InputKindName(InputKind kind) {
+  switch (kind) {
+    case InputKind::kDisparity:
+      return "disparity";
+    case InputKind::kDepth:
+      return "depth";
+  }
+  return "unknown";
+}
+
 void RosLogger::Log(axis_grasp::LogLevel level, const std::string& message) {
   switch (level) {
     case axis_grasp::LogLevel::kDebug:
@@ -157,7 +178,9 @@ RosDataSource::RosDataSource(ros::NodeHandle node,
                              double mask_wait_timeout_seconds,
                              LabelSource label_source,
                              const std::string& detections_topic,
-                             const DetectionFilterConfig& detection_filter)
+                             const DetectionFilterConfig& detection_filter,
+                             InputKind input_kind,
+                             const DepthInputConfig& depth)
     : node_(std::move(node)),
       sync_slop_ns_(static_cast<std::int64_t>(sync_slop_seconds * 1e9)),
       mask_wait_timeout_ns_(
@@ -165,9 +188,24 @@ RosDataSource::RosDataSource(ros::NodeHandle node,
       disparity_status_(axis_grasp::Status::Ok()),
       label_status_(axis_grasp::Status::Ok()),
       label_source_(label_source),
-      detection_filter_(detection_filter) {
-  disparity_subscriber_ =
-      node_.subscribe(disparity_topic, 1, &RosDataSource::OnDisparity, this);
+      detection_filter_(detection_filter),
+      input_kind_(input_kind),
+      depth_config_(depth) {
+  // Exactly one range topic is subscribed, as with label_topic/detections_topic.
+  if (input_kind_ == InputKind::kDepth) {
+#ifdef AXIS_GRASP_WITH_DETECTIONS
+    depth_subscriber_ =
+        node_.subscribe(depth_config_.topic, 1, &RosDataSource::OnDepth, this);
+#else
+    // node.cpp rejects this configuration at startup; a library caller that
+    // reaches here simply never receives a range image.
+    ROS_WARN_STREAM("input_kind is 'depth' but axis_grasp was built without "
+                    "bx_msgs; no frame will ever be produced");
+#endif
+  } else {
+    disparity_subscriber_ =
+        node_.subscribe(disparity_topic, 1, &RosDataSource::OnDisparity, this);
+  }
   if (label_source_ == LabelSource::kDetections) {
 #ifdef AXIS_GRASP_WITH_DETECTIONS
     detections_subscriber_ = node_.subscribe(
@@ -207,6 +245,160 @@ void RosDataSource::OnDisparity(const sensor_msgs::ImageConstPtr& message) {
   disparity_status_ = axis_grasp::Status::Ok();
 }
 
+#ifdef AXIS_GRASP_WITH_DETECTIONS
+axis_grasp::Status RosDataSource::LoadDepthIntrinsics(int width, int height,
+                                                      double focal_length) {
+  axis_grasp::Result<axis_grasp::CameraIntrinsics> loaded =
+      axis_grasp::LoadCalibrationJson(depth_config_.calibration_path, width,
+                                      height, depth_config_.native_width,
+                                      depth_config_.native_height);
+  if (!loaded.ok()) {
+    return axis_grasp::Status::Error(
+        loaded.status().code,
+        "depth input cannot use calibration '" +
+            depth_config_.calibration_path + "' at " + std::to_string(width) +
+            "x" + std::to_string(height) + ": " + loaded.status().message);
+  }
+  depth_intrinsics_ = loaded.value();
+  const axis_grasp::CameraIntrinsics& intrinsics = *depth_intrinsics_;
+  ROS_INFO_STREAM("depth input: " << width << "x" << height << " fx="
+                  << intrinsics.fx << " fy=" << intrinsics.fy << " cx="
+                  << intrinsics.cx << " cy=" << intrinsics.cy << " baseline="
+                  << intrinsics.baseline_m << "m");
+  // The conversion needs both, and the calibration file is free to supply
+  // neither: a stereo pair with no translation has a zero baseline, and the
+  // pipeline would reject the frame later anyway.
+  if (!(intrinsics.fx > 0.0) || !(intrinsics.baseline_m > 0.0)) {
+    return axis_grasp::Status::Error(
+        axis_grasp::ErrorCode::kInvalidArgument,
+        "depth input needs fx > 0 and a baseline > 0 to convert depth to "
+        "disparity, but calibration '" +
+            depth_config_.calibration_path + "' gives fx=" +
+            std::to_string(intrinsics.fx) +
+            " baseline_m=" + std::to_string(intrinsics.baseline_m));
+  }
+  // DepthImage.focal_length is fx in pixels despite documenting metres, as
+  // mine_centering measured: (W/2)/tan(hfov/2) reproduces it exactly. It is an
+  // independent read on the quantity the calibration file supplies, so a
+  // disagreement means one of the two is wrong. This is also what catches a
+  // wrong native_width/native_height, whose only other symptom is geometry that
+  // is finite, plausible, and off by a scale factor.
+  if (focal_length > 0.0) {
+    const double ratio = intrinsics.fx / focal_length;
+    if (std::fabs(ratio - 1.0) > 0.05) {
+      ROS_WARN_STREAM(
+          "depth input: calibration fx=" << intrinsics.fx
+          << " disagrees with the depth message's focal_length="
+          << focal_length << " by " << (ratio - 1.0) * 100.0
+          << "%; if focal_length describes the published image size, check "
+             "~native_width/~native_height, otherwise one of the two is wrong "
+             "and every range is scaled by it");
+    }
+  }
+  return axis_grasp::Status::Ok();
+}
+
+void RosDataSource::OnDepth(const bx_msgs::DepthImageConstPtr& message) {
+  // Same keep-one-pending guard as OnDisparity: replacing the pending frame at
+  // camera rate would continually restart the pairing deadline.
+  if (label_source_ == LabelSource::kMask && disparity_.has_value()) return;
+
+  if (message->depth_data.empty()) {
+    ROS_WARN_THROTTLE(5.0,
+                      "depth_data is empty; expected a uint16 PNG in "
+                      "millimetres");
+    return;
+  }
+  // PNG-encoded 16UC1, as mine_centering reads the same field.
+  const cv::Mat encoded(1, static_cast<int>(message->depth_data.size()), CV_8U,
+                        const_cast<std::uint8_t*>(message->depth_data.data()));
+  // A malformed payload is a per-message fault, not a permanent one: a
+  // truncated PNG in flight must not latch an error that outlives it. Skipping
+  // the frame leaves the next one free to become the pending frame, because the
+  // keep-one-pending guard only holds a frame that already converted.
+  const cv::Mat decoded = cv::imdecode(encoded, cv::IMREAD_UNCHANGED);
+  if (decoded.empty()) {
+    ROS_WARN_THROTTLE(5.0,
+                      "depth_data did not decode as an image (%zu bytes); "
+                      "expected a uint16 PNG in millimetres",
+                      message->depth_data.size());
+    return;
+  }
+  if (decoded.type() != CV_16UC1) {
+    ROS_WARN_THROTTLE(5.0,
+                      "depth PNG decoded to OpenCV type %d, expected 16UC1 "
+                      "(uint16 millimetres)",
+                      decoded.type());
+    return;
+  }
+  if (!depth_intrinsics_.has_value()) {
+    const axis_grasp::Status loaded =
+        LoadDepthIntrinsics(decoded.cols, decoded.rows, message->focal_length);
+    if (!loaded.ok()) {
+      // Latched: every later frame would fail the same way, so this becomes the
+      // sticky error Next() reports until the node is restarted.
+      depth_intrinsics_status_ = loaded;
+      return;
+    }
+  }
+
+  axis_grasp::Image<std::uint16_t> depth_mm(decoded.rows, decoded.cols, 0);
+  for (int y = 0; y < decoded.rows; ++y) {
+    const std::uint16_t* row = decoded.ptr<std::uint16_t>(y);
+    for (int x = 0; x < decoded.cols; ++x) {
+      depth_mm(y, x) = row[x];
+    }
+  }
+
+  std::size_t holes = 0;
+  axis_grasp::Result<axis_grasp::Image<float>> converted =
+      axis_grasp::DepthToDisparity(depth_mm, *depth_intrinsics_,
+                                   depth_config_.band, &holes);
+  if (!converted.ok()) {
+    // Unreachable while LoadDepthIntrinsics validates the same inputs, but a
+    // conversion error must not latch: the frame is simply skipped.
+    ROS_WARN_THROTTLE(5.0, "depth conversion failed: %s",
+                      converted.status().message.c_str());
+    return;
+  }
+  if (holes == depth_mm.size()) {
+    ROS_WARN_THROTTLE(5.0,
+                      "every sample of the depth frame is outside the writable "
+                      "band [%f, %f] m or missing; check ~depth_min_m and "
+                      "~depth_max_m",
+                      depth_config_.band.min_m, depth_config_.band.max_m);
+  } else if (holes * 4 > depth_mm.size()) {
+    ROS_WARN_THROTTLE(5.0, "%zu of %zu depth samples are holes or out of band",
+                      holes, depth_mm.size());
+  }
+
+  disparity_ = std::move(converted).value();
+  // DepthImage has no Header. unix_time_ms keeps a sensor-time stamp on the
+  // published pose array; pairing never uses it, because the label side would
+  // have to come from a different clock.
+  if (message->unix_time_ms == 0) {
+    disparity_stamp_ = ros::Time::now();
+  } else {
+    disparity_stamp_.fromNSec(message->unix_time_ms * 1000000ULL);
+  }
+  disparity_arrival_ = ros::Time::now();
+  disparity_frame_id_ = depth_config_.frame_id;
+  disparity_wait_started_ = std::chrono::steady_clock::now();
+  disparity_status_ = axis_grasp::Status::Ok();
+
+  // 100/101 are the WaterLinked 3D sonar types. Their beams are equiangular, so
+  // d = fx * baseline / Z is not their imaging model and the converted frame is
+  // not a stereo disparity at all.
+  if (message->sensor_type == 100 || message->sensor_type == 101) {
+    ROS_WARN_THROTTLE(
+        30.0,
+        "depth frame carries sensor_type=%u, a WaterLinked 3D sonar, whose "
+        "equiangular beams this stereo conversion does not model",
+        static_cast<unsigned>(message->sensor_type));
+  }
+}
+#endif
+
 void RosDataSource::OnLabels(const sensor_msgs::ImageConstPtr& message) {
   axis_grasp::Result<axis_grasp::Image<std::uint8_t>> decoded =
       DecodeLabels(*message);
@@ -216,6 +408,7 @@ void RosDataSource::OnLabels(const sensor_msgs::ImageConstPtr& message) {
   }
   labels_ = std::move(decoded).value();
   label_stamp_ = message->header.stamp;
+  label_arrival_ = ros::Time::now();
   label_pending_ = false;
   label_status_ = axis_grasp::Status::Ok();
 }
@@ -299,6 +492,7 @@ axis_grasp::Status RosDataSource::Next(axis_grasp::FrameInput* frame) {
     ros::spinOnce();
     if (!disparity_status_.ok()) return disparity_status_;
     if (!label_status_.ok()) return label_status_;
+    if (!depth_intrinsics_status_.ok()) return depth_intrinsics_status_;
     if (label_source_ == LabelSource::kDetections) {
 #ifdef AXIS_GRASP_WITH_DETECTIONS
       if (disparity_.has_value()) {
@@ -370,11 +564,20 @@ axis_grasp::Status RosDataSource::Next(axis_grasp::FrameInput* frame) {
                     now - *disparity_wait_started_)
                     .count()
               : 0;
+      // One clock on both sides. A depth frame has no header stamp, so in depth
+      // mode the range side has to be its receipt time -- and then the label
+      // side must be its own receipt time too, not its header stamp, which may
+      // sit on a completely different time base (bag replay, sim time).
+      const bool arrival_pairing = input_kind_ == InputKind::kDepth;
       const MaskPairingAction action = DecideMaskPairing(
           RoiSource::kLabelMask, labels_.has_value(),
-          disparity_stamp_.toNSec(),
-          labels_.has_value() ? label_stamp_.toNSec() : 0, elapsed_wait_ns,
-          sync_slop_ns_, mask_wait_timeout_ns_, label_pending_);
+          arrival_pairing ? disparity_arrival_.toNSec()
+                          : disparity_stamp_.toNSec(),
+          labels_.has_value() ? (arrival_pairing ? label_arrival_.toNSec()
+                                                 : label_stamp_.toNSec())
+                              : 0,
+          elapsed_wait_ns, sync_slop_ns_, mask_wait_timeout_ns_,
+          label_pending_);
       if (action == MaskPairingAction::kDiscardStaleMask) {
         labels_.reset();
         label_pending_ = false;
@@ -402,8 +605,13 @@ axis_grasp::Status RosDataSource::Next(axis_grasp::FrameInput* frame) {
             5.0,
             "axis_grasp: label image is newer than the pending disparity; "
             "processing the full disparity frame and keeping the label");
-        label_pending_ = true;
         PopulateFrame(frame, nullptr);
+        // Set after the call, not before it. PopulateFrame clears this flag so
+        // that every caller states its own outcome, and setting it first let
+        // that clear win: the retained label was then judged on the next
+        // iteration with mask_is_expected false and discarded as stale, which
+        // is the opposite of what keeping it is for.
+        label_pending_ = true;
         return axis_grasp::Status::Ok();
       }
       if (action == MaskPairingAction::kFallbackTimeout) {

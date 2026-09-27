@@ -9,9 +9,11 @@ namespace axis_grasp_ros1 {
 // means. Both sources fall back to whole-frame voting once their grace period
 // expires, but they disagree about a source that has already arrived.
 enum class RoiSource {
-  // A mono8 label image paired by header stamp. A label that arrived too early
-  // is retained, because the disparity it belongs to may simply not have been
-  // published yet.
+  // A mono8 label image paired by header stamp, or by receipt time when the
+  // range input carries no stamp -- DepthImage has no Header, so a depth-fed
+  // frame has no other clock to offer and both sides must use receipt times. A
+  // label that arrived too early is retained, because the disparity it belongs
+  // to may simply not have been published yet.
   kLabelMask,
   // DetectedInstances contours paired by local receipt time. The source always
   // arrives after the disparity it applies to, so a past-stamped entry is

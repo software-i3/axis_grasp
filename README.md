@@ -60,25 +60,108 @@ The production stereo baseline comes from that file and is not hard-coded.
 
 | Direction | Default topic | ROS type | Encoding/content |
 | --- | --- | --- | --- |
-| Input | `/disparity` | `sensor_msgs/Image` | `32FC1` or `64FC1`, pixel disparity |
+| Input | `/disparity` | `sensor_msgs/Image` | `32FC1` or `64FC1`, pixel disparity; used when `input_kind: disparity` |
+| Input | `/ikan/camera/depth_data` | `bx_msgs/DepthImage` | PNG-encoded `16UC1` millimetres; used when `input_kind: depth` |
 | Input | `/label` | `sensor_msgs/Image` | `mono8` or `8UC1`; zero outside, nonzero inside |
 | Input | `/ikan/vision/ml/detections` | `bx_msgs/DetectedInstances` | Polygon contours, used when `label_source: detections` |
 | Output | `/grasp_poses_by_pipeline` | `geometry_msgs/PoseArray` | Metres and quaternion `xyzw` |
 
+Exactly one range topic is subscribed, per `input_kind`; exactly one label source
+is active, per `label_source`. See [Range input](#range-input).
+
 `config/default.yaml` sets `output_topic: /grasp_poses_by_pipeline`; the built-in
 fallback when the YAML is not loaded is `/grasp_poses`.
 
-Either label source pairs its ROI with a disparity when the two stamps differ by
-at most `sync_slop_seconds`. A disparity waits up to
+Either label source pairs its ROI with a range frame when the two stamps differ
+by at most `sync_slop_seconds` — except in `input_kind: depth`, which pairs by
+receipt time because a `DepthImage` carries no header stamp (see
+[Range input](#range-input)). A range frame waits up to
 `mask_wait_timeout_seconds` (0.10 s by default) for a usable ROI; if none can
 pair, it is processed over the complete disparity frame instead of being
 dropped, so the node publishes whether or not a label or detections topic is
 present. The node logs its interface at startup and per-stage timings for every
 processed frame.
 
-`scripts/detection_relay.py` is a testing aid, not part of the pipeline: it
-republishes a `/label` image as `DetectedInstances` so the `detections` source can
-be exercised without a live perception stack. See `docs/BUILD_AND_RUN.md`.
+`scripts/` holds testing aids, not part of the pipeline. `detection_relay.py`
+republishes a `/label` image as `DetectedInstances` so the `detections` source
+can be exercised without a live perception stack; `disparity_to_depth.py` goes
+the other way, republishing a `/disparity` image as a synthetic
+`bx_msgs/DepthImage`, which is how the depth input mode can be exercised against
+a bag that carries only disparity; `disparity_quantizer.py` republishes
+`/disparity` rounded through the millimetre depth grid, isolating the
+quantization the depth mode introduces from everything else about it. See
+`docs/BUILD_AND_RUN.md`.
+
+## Range input
+
+`input_kind` selects where the range image comes from. Both modes produce the
+same `FrameInput::disparity`; nothing downstream of it changes.
+
+### `disparity` (default)
+
+A `32FC1` or `64FC1` pixel-disparity image on `disparity_topic`.
+
+### `depth`
+
+A `bx_msgs/DepthImage` on `depth_topic` — a PNG-encoded `16UC1` depth map in
+millimetres. It is decoded and reparametrized to pixel disparity using the
+calibration's `fx` and baseline:
+
+```
+d = fx * baseline_m / (raw_mm / 1000)
+```
+
+That is the exact inverse of the reprojection the grasp stage already performs
+(`Z = -fx * baseline / d`), so the geometry is the one the disparity mode sees.
+`raw_mm == 0` (a hole), a value outside `depth_min_m`/`depth_max_m`, and
+non-finite samples all become `d = 0`, which is how an invalid stereo pixel
+already reads.
+
+Run it without editing the YAML:
+
+```bash
+roslaunch axis_grasp axis_grasp.launch input_kind:=depth \
+  depth_topic:=/ikan/camera/depth_data label_source:=detections
+```
+
+`input_kind`, `disparity_topic` and `depth_topic` are launch arguments; each left
+empty keeps its value from `config`.
+
+**Pairing uses arrival time in depth mode.** `DepthImage` has no
+`std_msgs/Header`, so there is no publisher stamp to pair on: the mask source
+pairs by receipt time instead (`label_source: detections` already did). A nonzero
+`unix_time_ms` still stamps the published `PoseArray`, so output timestamps stay
+sensor-referenced even though pairing does not use them.
+
+### Traps
+
+- **Resolution.** The converted disparity is at the *depth* image's resolution.
+  The mask path's shape gate rejects a label image of any other size as a hard
+  mismatch and drops that frame — so with a mismatched label, every frame is
+  dropped. Use `label_source: detections`, which rescales per-instance contours
+  onto the range resolution by construction, or a same-resolution mask.
+- **`native_width`/`native_height`** are the resolution the calibration file is
+  valid *at*; the loader scales `fx`/`fy`/`cx`/`cy` by capture/native. If the
+  file is valid at the depth image's own size, set these to it so the scale is
+  1.0. The `focal_length` cross-check warns when the loaded `fx` disagrees with
+  `DepthImage.focal_length` by more than 5%, naming `~native_width` — that
+  warning is the symptom of getting this wrong.
+- **`fx` must be right even though the baseline cancels.** In `X = (x-cx)*B/d`
+  and `Z = fx*B/d` the baseline cancels out of the geometry entirely, but `fx`
+  and `cx` do not — and the voting stage also works in *disparity pixels*
+  (`r_min`/`r_max`, `bilateral_sigma_color`), so a wrong `fx` changes the
+  effective metric voting radius. `r_min`/`r_max` tuned at one resolution do not
+  transfer to a depth image at another; re-validate them.
+- **Expect the pose *set* to move, not the poses.** Recovering disparity from
+  quantized millimetres perturbs it by up to ~0.05 px at 1 m, and component
+  selection is threshold-sharp: a perturbation that small changes which
+  components and arcs are selected, so pose *counts* differ from run to run even
+  though positions agree to well under a millimetre. The same is true of any
+  disagreement between the sensor's true `fx*baseline` and the calibration
+  file's, which enters as a uniform scale on every disparity. Verified against
+  this repository's own captures: feeding the depth path's exact pixels through
+  the disparity path reproduces 121 of 123 comparable frames to within a micron,
+  while pose counts on individual frames still differ by factors.
 
 ## Label sources
 
@@ -146,9 +229,11 @@ since it is a list. Leaving any of them empty keeps the value from `config`.
 catkin_make -DAXIS_GRASP_WITH_DETECTIONS=OFF
 ```
 
-A build without it still supports `label_source: mask`, and rejects
-`label_source: detections` at startup with a fatal message rather than failing
-to link.
+A build without it still supports `label_source: mask` and
+`input_kind: disparity`, and rejects `label_source: detections` and
+`input_kind: depth` at startup with a fatal message rather than failing to link.
+All three of these uses of `bx_msgs` — detections contours, the `DepthImage`
+payload, and the depth mode's message type — are behind that one option.
 
 ## Configuration
 
@@ -161,6 +246,11 @@ roslaunch axis_grasp axis_grasp.launch \
 ```
 
 Parameters are loaded at startup; restart the node after changing the YAML.
+
+Input keys: `input_kind`, `disparity_topic`, `depth_topic`, `depth_frame_id`,
+`depth_min_m`, `depth_max_m` (see [Range input](#range-input)); `label_source`,
+`label_topic`, `detections_topic`, `detector_name`, `min_confidence`,
+`detection_classes` (see [Label sources](#label-sources)).
 
 ### ROI crop
 
@@ -210,6 +300,21 @@ rostopic hz /label
 rostopic type /disparity
 rostopic type /label
 rosparam get /axis_grasp_node
+```
+
+The node's startup line names the range topic it actually subscribed to, so it
+is the quickest check that a launch argument took effect:
+
+```
+axis_grasp ready: range=/disparity (input_kind=disparity) label_source=mask ...
+```
+
+In depth mode, watch the depth topic instead, and note that the node subscribes
+to it directly — there is no intermediate disparity topic to inspect:
+
+```bash
+rostopic hz /ikan/camera/depth_data
+rostopic type /ikan/camera/depth_data
 ```
 
 When using `label_source: detections`, watch the detections instead of `/label`:

@@ -34,6 +34,11 @@ int main(int argc, char** argv) {
   std::string detector_name;
   std::vector<std::string> detection_classes;
   int min_confidence = 0;
+  std::string input_kind_name = "disparity";
+  std::string depth_topic = "/ikan/camera/depth_data";
+  std::string depth_frame_id;
+  double depth_min_m = 0.05;
+  double depth_max_m = 100.0;
   private_node.param("disparity_topic", disparity_topic, disparity_topic);
   private_node.param("label_topic", label_topic, label_topic);
   private_node.param("output_topic", output_topic, output_topic);
@@ -51,6 +56,11 @@ int main(int argc, char** argv) {
   private_node.param("detection_classes", detection_classes,
                      detection_classes);
   private_node.param("min_confidence", min_confidence, min_confidence);
+  private_node.param("input_kind", input_kind_name, input_kind_name);
+  private_node.param("depth_topic", depth_topic, depth_topic);
+  private_node.param("depth_frame_id", depth_frame_id, depth_frame_id);
+  private_node.param("depth_min_m", depth_min_m, depth_min_m);
+  private_node.param("depth_max_m", depth_max_m, depth_max_m);
   if (calibration_path.empty()) {
     ROS_FATAL("~calibration is required");
     return 1;
@@ -74,6 +84,31 @@ int main(int argc, char** argv) {
   if (label_source.value() == axis_grasp_ros1::LabelSource::kDetections) {
     ROS_FATAL("label_source is 'detections' but axis_grasp was built without "
               "bx_msgs; rebuild with -DAXIS_GRASP_WITH_DETECTIONS=ON");
+    return 1;
+  }
+#endif
+  axis_grasp::Result<axis_grasp_ros1::InputKind> input_kind =
+      axis_grasp_ros1::ParseInputKind(input_kind_name);
+  if (!input_kind.ok()) {
+    ROS_FATAL_STREAM(input_kind.status().message);
+    return 1;
+  }
+  if (!std::isfinite(depth_min_m) || !std::isfinite(depth_max_m) ||
+      depth_min_m > depth_max_m || depth_min_m < 0.0) {
+    ROS_FATAL("~depth_min_m/~depth_max_m must be a finite ascending interval "
+              "with a non-negative lower bound");
+    return 1;
+  }
+  if (input_kind.value() == axis_grasp_ros1::InputKind::kDepth &&
+      depth_topic.empty()) {
+    ROS_FATAL("input_kind is 'depth' but ~depth_topic is empty");
+    return 1;
+  }
+#ifndef AXIS_GRASP_WITH_DETECTIONS
+  if (input_kind.value() == axis_grasp_ros1::InputKind::kDepth) {
+    ROS_FATAL("input_kind is 'depth' but axis_grasp was built without bx_msgs, "
+              "which carries bx_msgs/DepthImage; rebuild with "
+              "-DAXIS_GRASP_WITH_DETECTIONS=ON");
     return 1;
   }
 #endif
@@ -145,10 +180,22 @@ int main(int argc, char** argv) {
   detection_filter.classes = detection_classes;
   detection_filter.min_confidence = min_confidence;
 
+  // native_width/native_height are handed to the adapter as well as used below,
+  // so the disparity it computes and the reprojection this node builds are
+  // always scaled the same way.
+  axis_grasp_ros1::DepthInputConfig depth_config;
+  depth_config.topic = depth_topic;
+  depth_config.calibration_path = calibration_path;
+  depth_config.native_width = native_width;
+  depth_config.native_height = native_height;
+  depth_config.frame_id = depth_frame_id;
+  depth_config.band.min_m = depth_min_m;
+  depth_config.band.max_m = depth_max_m;
+
   auto source = std::make_unique<axis_grasp_ros1::RosDataSource>(
       node, disparity_topic, label_topic, sync_slop_seconds,
       mask_wait_timeout_seconds, label_source.value(), detections_topic,
-      detection_filter);
+      detection_filter, input_kind.value(), depth_config);
   ros::Publisher publisher =
       node.advertise<geometry_msgs::PoseArray>(output_topic, 1);
   axis_grasp_ros1::RosLogger logger;
@@ -169,7 +216,15 @@ int main(int argc, char** argv) {
         ", fallback_timeout=" + std::to_string(mask_wait_timeout_seconds) +
         "s)";
   }
-  ROS_INFO_STREAM("axis_grasp ready: disparity=" << disparity_topic
+  const std::string range_description =
+      input_kind.value() == axis_grasp_ros1::InputKind::kDepth
+          ? depth_topic + " (input_kind=depth, converted to disparity with " +
+                calibration_path + " at " + std::to_string(native_width) + "x" +
+                std::to_string(native_height) + ", band " +
+                std::to_string(depth_min_m) + "-" + std::to_string(depth_max_m) +
+                "m)"
+          : disparity_topic + " (input_kind=disparity)";
+  ROS_INFO_STREAM("axis_grasp ready: range=" << range_description
                   << " label_source=" << label_source_name << " from "
                   << label_description << " output=" << output_topic
                   << " strategy=" << strategy_name
@@ -180,7 +235,10 @@ int main(int argc, char** argv) {
     const axis_grasp::Status next = source->Next(&frame);
     if (next.code == axis_grasp::ErrorCode::kEndOfStream) break;
     if (!next.ok()) {
+      // Next() returns a sticky error before it ever reaches its own wait, so
+      // without this the loop spins at 100% CPU re-logging the same message.
       ROS_ERROR_STREAM(next.message);
+      ros::WallDuration(0.5).sleep();
       continue;
     }
     if (!pipeline.has_value()) {

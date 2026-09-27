@@ -13,6 +13,20 @@
   <arg name="detector_name" default=""/>
   <arg name="min_confidence" default=""/>
 
+  <!-- Range input. Left empty, the values in `config` apply. Switch to the
+       depth source, which converts bx_msgs/DepthImage to disparity, without
+       editing the YAML:
+         roslaunch axis_grasp axis_grasp.launch input_kind:=depth \
+           depth_topic:=/depth_image label_source:=detections
+       `disparity_topic` is the mirror of `depth_topic` and is what makes the
+       A/B in docs/BUILD_AND_RUN.md runnable: exactly one of the two is
+       subscribed, per `input_kind`.
+       `input_kind` is not a bool, so it is passed through as a string rather
+       than with a type attribute. -->
+  <arg name="input_kind" default=""/>
+  <arg name="disparity_topic" default=""/>
+  <arg name="depth_topic" default=""/>
+
   <!-- Straight-line rope removal, on by default (`remove_straight_rope` in
        `config`). Turn it off to keep the rope in the coherent vote
        accumulator, which is what the voting and grasp stages then see:
@@ -31,6 +45,12 @@
            if="$(eval arg('detector_name') != '')"/>
     <param name="min_confidence" value="$(arg min_confidence)"
            if="$(eval arg('min_confidence') != '')"/>
+    <param name="input_kind" value="$(arg input_kind)"
+           if="$(eval arg('input_kind') != '')"/>
+    <param name="disparity_topic" value="$(arg disparity_topic)"
+           if="$(eval arg('disparity_topic') != '')"/>
+    <param name="depth_topic" value="$(arg depth_topic)"
+           if="$(eval arg('depth_topic') != '')"/>
     <param name="remove_straight_rope" value="$(arg remove_straight_rope)"
            type="bool" if="$(eval arg('remove_straight_rope') != '')"/>
   </node>
