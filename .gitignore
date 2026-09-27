@@ -1,3 +1,5 @@
 # Local Claude Code package guidance; intentionally not committed.
 CLAUDE.md
 docs/
+build/
+devel/

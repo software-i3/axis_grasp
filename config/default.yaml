@@ -36,6 +36,10 @@ r_min: 2
 r_max: 14
 magnitude_percentile: 70.0
 direction_bins: 8
+# Drop straight-line components (rope, cable) from the coherent vote
+# accumulator before component filtering. This is the rope on/off switch: with
+# `false` the rope survives into voting and grasp proposal. Override per launch
+# with `remove_straight_rope:=true|false`.
 remove_straight_rope: true
 bilateral_diameter: 9
 bilateral_sigma_color: 75.0

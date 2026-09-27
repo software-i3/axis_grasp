@@ -174,14 +174,8 @@ Pca2d ComputePca2d(const std::vector<Vec2i>& points) {
   return result;
 }
 
-double PerpendicularDistance(const Pca2d& line, double x, double y) {
-  return std::abs(line.direction_x * (y - line.mean_y) -
-                  line.direction_y * (x - line.mean_x));
-}
-
 struct LineFit {
   Pca2d line;
-  std::vector<Vec2i> inliers;
   double inlier_fraction = 0.0;
 };
 
@@ -189,6 +183,9 @@ struct LineFit {
 // grasp_proposal.cpp: sample, score, keep the best consensus, then refit the
 // direction by PCA over the winning inliers. Returns nullopt when the consensus
 // covers less than min_inlier_fraction of the points.
+//
+// It returns the consensus rather than a bool because the fit is the useful
+// result of the search; the rope filter itself only asks whether one exists.
 std::optional<LineFit> FitLineRansac(const std::vector<Vec2i>& points,
                                      double distance_threshold, int iterations,
                                      double min_inlier_fraction,
@@ -247,7 +244,7 @@ std::optional<LineFit> FitLineRansac(const std::vector<Vec2i>& points,
   if (inliers.size() < 2 || fraction < min_inlier_fraction) {
     return std::nullopt;
   }
-  return LineFit{ComputePca2d(inliers), std::move(inliers), fraction};
+  return LineFit{ComputePca2d(inliers), fraction};
 }
 
 }  // namespace
@@ -360,36 +357,11 @@ Result<Image<float>> RemoveStraightComponents(
         FitLineRansac(skeleton_points, config.ransac_distance_pixels,
                       config.ransac_iterations,
                       config.ransac_min_inlier_fraction, config.ransac_seed);
+    // The consensus fit is the whole straightness test. Measuring a residual
+    // afterwards added nothing: every inlier is within ransac_distance_pixels
+    // of the line by construction, so the old residual-vs-band-width gate could
+    // only restate the threshold it was given.
     if (!fit.has_value()) continue;
-
-    // Both scales are measured from the consensus set alone, so a fragment
-    // merged into the band cannot widen the tolerance that is supposed to
-    // describe the rope.
-    std::vector<double> skeleton_distance;
-    skeleton_distance.reserve(fit->inliers.size());
-    for (const Vec2i& point : fit->inliers) {
-      skeleton_distance.push_back(
-          PerpendicularDistance(fit->line, point.x, point.y));
-    }
-    const double residual_95 =
-        internal::Percentile(std::move(skeleton_distance), 95.0);
-    std::vector<double> band_distance;
-    band_distance.reserve(band.size());
-    for (const Vec2i& point : band) {
-      const double distance = PerpendicularDistance(
-          fit->line, point.x + kPadding, point.y + kPadding);
-      if (distance <= config.ransac_distance_pixels) {
-        band_distance.push_back(distance);
-      }
-    }
-    if (band_distance.empty()) continue;
-    const double band_width =
-        internal::Percentile(std::move(band_distance), 95.0);
-    if (residual_95 >
-        std::max(config.residual_pixels,
-                 config.residual_fraction * band_width)) {
-      continue;
-    }
 
     // Zero every positive-mask component the band touches, not just the one
     // holding band.front(). A component that is correctly classified as

@@ -173,6 +173,26 @@ coordinates are shifted back.
 Keep `roi_crop_padding: -1` unless you validate a smaller manual value. Set
 `enable_roi_crop: false` to process the full image. See `VALIDATION.md`.
 
+### Rope filter
+
+`remove_straight_rope: true` (the default) drops straight-line components — rope
+and cable — from the coherent vote accumulator, so they never reach component
+filtering or grasp proposal. It is also the one rope option exposed at launch,
+which makes it the rope on/off switch:
+
+```bash
+roslaunch axis_grasp axis_grasp.launch remove_straight_rope:=false
+```
+
+Leaving the argument out keeps the YAML value, and a value that is not a bool
+fails the launch rather than being read as `true`.
+
+A component is treated as rope when it clears `min_pixels`, is elongated, has a
+skeleton of at least 80 pixels, and at least 70% of that skeleton sits within
+2 px of a single RANSAC line. Those thresholds are the `RopeFilterConfig`
+defaults in `core/include/axis_grasp/core/config.h`; they are not YAML keys,
+because they came from an offline validation rather than from launch-time tuning.
+
 ## OpenCV scope
 
 OpenCV handles operations with direct optimized equivalents: bilateral filter,

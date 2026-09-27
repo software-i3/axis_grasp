@@ -13,6 +13,12 @@
   <arg name="detector_name" default=""/>
   <arg name="min_confidence" default=""/>
 
+  <!-- Straight-line rope removal, on by default (`remove_straight_rope` in
+       `config`). Turn it off to keep the rope in the coherent vote
+       accumulator, which is what the voting and grasp stages then see:
+         roslaunch axis_grasp axis_grasp.launch remove_straight_rope:=false -->
+  <arg name="remove_straight_rope" default=""/>
+
   <node pkg="axis_grasp" type="axis_grasp_node" name="axis_grasp_node"
         output="screen" required="true">
     <rosparam command="load" file="$(arg config)"/>
@@ -25,5 +31,7 @@
            if="$(eval arg('detector_name') != '')"/>
     <param name="min_confidence" value="$(arg min_confidence)"
            if="$(eval arg('min_confidence') != '')"/>
+    <param name="remove_straight_rope" value="$(arg remove_straight_rope)"
+           type="bool" if="$(eval arg('remove_straight_rope') != '')"/>
   </node>
 </launch>
