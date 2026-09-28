@@ -1,9 +1,9 @@
 #ifndef AXIS_GRASP_ADAPTERS_ADAPTER_UTILS_H_
 #define AXIS_GRASP_ADAPTERS_ADAPTER_UTILS_H_
 
-#include <filesystem>
 #include <string>
 
+#include "axis_grasp/adapters/filesystem_compat.h"
 #include "axis_grasp/core/config.h"
 #include "axis_grasp/core/logger.h"
 #include "axis_grasp/core/status.h"
@@ -17,7 +17,7 @@ class StderrLogger final : public Logger {
 };
 
 Result<CameraIntrinsics> LoadCalibrationJson(
-    const std::filesystem::path& path, int capture_width, int capture_height,
+    const axis_grasp::fs::path& path, int capture_width, int capture_height,
     int native_width, int native_height);
 
 Result<GraspStrategy> ParseGraspStrategy(const std::string& value);
@@ -25,7 +25,7 @@ const char* GraspStrategyName(GraspStrategy strategy);
 const char* ErrorCodeName(ErrorCode code);
 
 Status WriteOutputCsv(const PipelineOutput& output,
-                      const std::filesystem::path& output_directory,
+                      const axis_grasp::fs::path& output_directory,
                       GraspStrategy strategy);
 
 }  // namespace axis_grasp

@@ -1,4 +1,5 @@
 #include "axis_grasp/adapters/dataset_source.h"
+#include "axis_grasp/adapters/filesystem_compat.h"
 
 #include "axis_grasp/adapters/polygon_mask.h"
 
@@ -9,7 +10,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
@@ -44,7 +44,7 @@ T ByteSwap(T value) {
   return value;
 }
 
-Result<NpyData> ReadNpy(const std::filesystem::path& path) {
+Result<NpyData> ReadNpy(const axis_grasp::fs::path& path) {
   std::ifstream stream(path, std::ios::binary);
   if (!stream) {
     return Status::Error(ErrorCode::kIo,
@@ -150,7 +150,7 @@ T ReadElement(const NpyData& data, std::size_t index) {
 }
 
 Result<Image<std::uint8_t>> LoadPolygonMask(
-    const std::filesystem::path& path, int width, int height) {
+    const axis_grasp::fs::path& path, int width, int height) {
   std::ifstream stream(path);
   if (!stream) {
     return Status::Error(ErrorCode::kIo,
@@ -179,13 +179,13 @@ DatasetDataSource::DatasetDataSource(std::vector<DatasetFramePaths> frames)
     : frames_(std::move(frames)) {}
 
 Result<DatasetDataSource> DatasetDataSource::FromPair(
-    const std::filesystem::path& disparity,
-    const std::filesystem::path& label, bool use_label) {
-  if (!std::filesystem::is_regular_file(disparity)) {
+    const axis_grasp::fs::path& disparity,
+    const axis_grasp::fs::path& label, bool use_label) {
+  if (!axis_grasp::fs::is_regular_file(disparity)) {
     return Status::Error(ErrorCode::kIo,
                          "Disparity file does not exist: " + disparity.string());
   }
-  if (use_label && !std::filesystem::is_regular_file(label)) {
+  if (use_label && !axis_grasp::fs::is_regular_file(label)) {
     return Status::Error(ErrorCode::kIo,
                          "Label file does not exist: " + label.string());
   }
@@ -193,37 +193,41 @@ Result<DatasetDataSource> DatasetDataSource::FromPair(
 }
 
 Result<DatasetDataSource> DatasetDataSource::Discover(
-    const std::filesystem::path& dataset_root, bool use_labels) {
-  if (!std::filesystem::is_directory(dataset_root)) {
+    const axis_grasp::fs::path& dataset_root, bool use_labels) {
+  if (!axis_grasp::fs::is_directory(dataset_root)) {
     return Status::Error(ErrorCode::kIo,
                          "Dataset root does not exist: " +
                              dataset_root.string());
   }
-  std::vector<std::filesystem::path> categories;
-  if (std::filesystem::is_directory(dataset_root / "disparity")) {
+  std::vector<axis_grasp::fs::path> categories;
+  if (axis_grasp::fs::is_directory(dataset_root / "disparity")) {
     categories.push_back(dataset_root);
   }
-  for (const auto& entry : std::filesystem::directory_iterator(dataset_root)) {
-    if (entry.is_directory() &&
-        std::filesystem::is_directory(entry.path() / "disparity")) {
+  // directory_entry::is_directory() and ::is_regular_file() are C++17 members;
+  // GCC 7's std::experimental::filesystem has only the free functions, so query
+  // the path rather than the entry.
+  for (const auto& entry : axis_grasp::fs::directory_iterator(dataset_root)) {
+    if (axis_grasp::fs::is_directory(entry.path()) &&
+        axis_grasp::fs::is_directory(entry.path() / "disparity")) {
       categories.push_back(entry.path());
     }
   }
   std::sort(categories.begin(), categories.end());
   std::vector<DatasetFramePaths> frames;
-  for (const std::filesystem::path& category : categories) {
-    std::vector<std::filesystem::path> disparities;
+  for (const axis_grasp::fs::path& category : categories) {
+    std::vector<axis_grasp::fs::path> disparities;
     for (const auto& entry :
-         std::filesystem::directory_iterator(category / "disparity")) {
-      if (entry.is_regular_file() && entry.path().extension() == ".npy") {
+         axis_grasp::fs::directory_iterator(category / "disparity")) {
+      if (axis_grasp::fs::is_regular_file(entry.path()) &&
+          entry.path().extension() == ".npy") {
         disparities.push_back(entry.path());
       }
     }
     std::sort(disparities.begin(), disparities.end());
-    for (const std::filesystem::path& disparity : disparities) {
-      std::filesystem::path label = category / "labels" /
+    for (const axis_grasp::fs::path& disparity : disparities) {
+      axis_grasp::fs::path label = category / "labels" /
                                     (disparity.stem().string() + ".txt");
-      if (use_labels && !std::filesystem::is_regular_file(label)) continue;
+      if (use_labels && !axis_grasp::fs::is_regular_file(label)) continue;
       frames.push_back({disparity, label, use_labels});
     }
   }
@@ -261,19 +265,19 @@ Status DatasetDataSource::Next(FrameInput* frame) {
   frame->frame_id = "camera";
   std::error_code timestamp_error;
   const auto timestamp =
-      std::filesystem::last_write_time(paths.disparity, timestamp_error);
+      axis_grasp::fs::last_write_time(paths.disparity, timestamp_error);
   if (timestamp_error) {
     frame->timestamp_ns = 0;
   } else {
     const auto system_time = std::chrono::time_point_cast<std::chrono::nanoseconds>(
-        timestamp - std::filesystem::file_time_type::clock::now() +
+        timestamp - axis_grasp::fs::file_time_type::clock::now() +
         std::chrono::system_clock::now());
     frame->timestamp_ns = system_time.time_since_epoch().count();
   }
   return Status::Ok();
 }
 
-Result<Image<float>> LoadNpyDisparity(const std::filesystem::path& path) {
+Result<Image<float>> LoadNpyDisparity(const axis_grasp::fs::path& path) {
   Result<NpyData> source_result = ReadNpy(path);
   if (!source_result.ok()) return source_result.status();
   NpyData source = std::move(source_result).value();
@@ -291,7 +295,7 @@ Result<Image<float>> LoadNpyDisparity(const std::filesystem::path& path) {
   return output;
 }
 
-Result<Image<std::uint8_t>> LoadLabelMask(const std::filesystem::path& path,
+Result<Image<std::uint8_t>> LoadLabelMask(const axis_grasp::fs::path& path,
                                          int width, int height) {
   if (path.extension() == ".txt") return LoadPolygonMask(path, width, height);
   if (path.extension() != ".npy") {

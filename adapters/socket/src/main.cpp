@@ -1,7 +1,6 @@
 #include <cstdlib>
 #include <cstdint>
 #include <exception>
-#include <filesystem>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -9,6 +8,7 @@
 
 #include "axis_grasp/adapters/adapter_utils.h"
 #include "axis_grasp/adapters/data_source.h"
+#include "axis_grasp/adapters/filesystem_compat.h"
 #include "axis_grasp/adapters/socket_source.h"
 #include "axis_grasp/core/config.h"
 #include "axis_grasp/core/pipeline.h"
@@ -17,8 +17,8 @@ namespace axis_grasp {
 namespace {
 
 struct Options {
-  std::filesystem::path calibration;
-  std::filesystem::path output = "socket_results";
+  axis_grasp::fs::path calibration;
+  axis_grasp::fs::path output = "socket_results";
   std::string strategy = "camera";
   SocketOptions socket;
   PipelineConfig pipeline;

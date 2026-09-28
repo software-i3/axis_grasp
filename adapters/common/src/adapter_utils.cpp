@@ -1,8 +1,8 @@
 #include "axis_grasp/adapters/adapter_utils.h"
+#include "axis_grasp/adapters/filesystem_compat.h"
 
 #include <cmath>
 #include <cstdlib>
-#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -47,7 +47,7 @@ void StderrLogger::Log(LogLevel level, const std::string& message) {
 }
 
 Result<CameraIntrinsics> LoadCalibrationJson(
-    const std::filesystem::path& path, int capture_width, int capture_height,
+    const axis_grasp::fs::path& path, int capture_width, int capture_height,
     int native_width, int native_height) {
   std::ifstream stream(path);
   if (!stream) {
@@ -131,20 +131,20 @@ const char* ErrorCodeName(ErrorCode code) {
 }
 
 Status WriteOutputCsv(const PipelineOutput& output,
-                      const std::filesystem::path& output_directory,
+                      const axis_grasp::fs::path& output_directory,
                       GraspStrategy strategy) {
   std::error_code filesystem_error;
-  std::filesystem::create_directories(output_directory, filesystem_error);
+  axis_grasp::fs::create_directories(output_directory, filesystem_error);
   if (filesystem_error) {
     return Status::Error(ErrorCode::kIo,
                          "Cannot create output directory: " +
                              filesystem_error.message());
   }
-  const std::filesystem::path poses_path =
+  const axis_grasp::fs::path poses_path =
       output_directory / (output.frame_name + "_poses.csv");
-  const std::filesystem::path points_path =
+  const axis_grasp::fs::path points_path =
       output_directory / (output.frame_name + "_points.csv");
-  const std::filesystem::path timing_path =
+  const axis_grasp::fs::path timing_path =
       output_directory / (output.frame_name + "_timings.csv");
   std::ofstream poses(poses_path);
   std::ofstream points(points_path);

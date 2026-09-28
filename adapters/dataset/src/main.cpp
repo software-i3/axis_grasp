@@ -1,12 +1,12 @@
 #include <cstdlib>
 #include <exception>
-#include <filesystem>
 #include <iostream>
 #include <string>
 #include <utility>
 
 #include "axis_grasp/adapters/adapter_utils.h"
 #include "axis_grasp/adapters/dataset_source.h"
+#include "axis_grasp/adapters/filesystem_compat.h"
 #include "axis_grasp/core/config.h"
 #include "axis_grasp/core/pipeline.h"
 
@@ -14,11 +14,11 @@ namespace axis_grasp {
 namespace {
 
 struct Options {
-  std::filesystem::path disparity;
-  std::filesystem::path label;
-  std::filesystem::path dataset_root;
-  std::filesystem::path calibration;
-  std::filesystem::path output = "cpp_results";
+  axis_grasp::fs::path disparity;
+  axis_grasp::fs::path label;
+  axis_grasp::fs::path dataset_root;
+  axis_grasp::fs::path calibration;
+  axis_grasp::fs::path output = "cpp_results";
   std::string strategy = "camera";
   bool use_label = true;
   int capture_width = 800;
@@ -137,7 +137,7 @@ Result<Options> ParseOptions(int argc, char** argv) {
                          "--label is only valid with --disparity");
   }
   if (!options.disparity.empty() && options.use_label && options.label.empty()) {
-    const std::filesystem::path candidate =
+    const axis_grasp::fs::path candidate =
         options.disparity.parent_path().parent_path() / "labels" /
         (options.disparity.stem().string() + ".txt");
     options.label = candidate;
