@@ -57,9 +57,19 @@ endif()
 if(BUILD_TESTING AND AXIS_GRASP_BUILD_TESTS)
   find_package(GTest QUIET)
   if(GTest_FOUND)
+    # CMake below 3.20 names the test main library GTest::Main; the
+    # GTest::gtest_main spelling only arrived in 3.20. Pick whichever exists so
+    # the tests link under the vehicle's CMake 3.10.2 as well as a modern CMake.
+    if(TARGET GTest::gtest_main)
+      set(AXIS_GRASP_GTEST_MAIN GTest::gtest_main)
+    elseif(TARGET GTest::Main)
+      set(AXIS_GRASP_GTEST_MAIN GTest::Main)
+    else()
+      set(AXIS_GRASP_GTEST_MAIN ${GTEST_BOTH_LIBRARIES})
+    endif()
     add_executable(axis_grasp_mask_pairing_tests test/mask_pairing_test.cpp)
     target_link_libraries(axis_grasp_mask_pairing_tests
-      PRIVATE axis_grasp_mask_pairing GTest::gtest_main
+      PRIVATE axis_grasp_mask_pairing ${AXIS_GRASP_GTEST_MAIN}
     )
     include(GoogleTest)
     gtest_discover_tests(axis_grasp_mask_pairing_tests)

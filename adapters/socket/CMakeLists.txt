@@ -1,4 +1,8 @@
-cmake_minimum_required(VERSION 3.14)
+# 3.10, not 3.14, so the vehicle's system CMake (3.10.2 on Ubuntu 18.04) can
+# configure the default (socket-off) build. Note third_party/uvgrtp below still
+# declares 3.14, so AXIS_GRASP_BUILD_SOCKET=ON needs a newer CMake than the
+# vehicle ships; see docs/BUILD_AND_RUN.md section 8.
+cmake_minimum_required(VERSION 3.10)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(axis_grasp_socket_project LANGUAGES CXX)
