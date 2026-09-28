@@ -61,7 +61,7 @@ The production stereo baseline comes from that file and is not hard-coded.
 | Direction | Default topic | ROS type | Encoding/content |
 | --- | --- | --- | --- |
 | Input | `/disparity` | `sensor_msgs/Image` | `32FC1` or `64FC1`, pixel disparity; used when `input_kind: disparity` |
-| Input | `/ikan/camera/depth_data` | `bx_msgs/DepthImage` | PNG-encoded `16UC1` millimetres; used when `input_kind: depth` |
+| Input | `/ikan/camera/depth_data` | `bx_msgs/DepthImage` | Encoded depth map: `16UC1` PNG millimetres, or `32FC1` metres; used when `input_kind: depth` |
 | Input | `/label` | `sensor_msgs/Image` | `mono8` or `8UC1`; zero outside, nonzero inside |
 | Input | `/ikan/vision/ml/detections` | `bx_msgs/DetectedInstances` | Polygon contours, used when `label_source: detections` |
 | Output | `/grasp_poses_by_pipeline` | `geometry_msgs/PoseArray` | Metres and quaternion `xyzw` |
@@ -89,8 +89,13 @@ the other way, republishing a `/disparity` image as a synthetic
 `bx_msgs/DepthImage`, which is how the depth input mode can be exercised against
 a bag that carries only disparity; `disparity_quantizer.py` republishes
 `/disparity` rounded through the millimetre depth grid, isolating the
-quantization the depth mode introduces from everything else about it. See
-`docs/BUILD_AND_RUN.md`.
+quantization the depth mode introduces from everything else about it;
+`depth_to_disparity_relay.py` is the third direction — a metric depth image on
+a plain `sensor_msgs/Image` converted to disparity in flight, so a depth topic
+that has not migrated to `bx_msgs/DepthImage` can drive the node with
+`input_kind: disparity` unchanged. That last one is a stopgap for a producer
+that is expected to move to `DepthImage`, at which point `input_kind: depth`
+supersedes it and the script can go. See `docs/BUILD_AND_RUN.md`.
 
 ## Range input
 
@@ -103,19 +108,28 @@ A `32FC1` or `64FC1` pixel-disparity image on `disparity_topic`.
 
 ### `depth`
 
-A `bx_msgs/DepthImage` on `depth_topic` — a PNG-encoded `16UC1` depth map in
-millimetres. It is decoded and reparametrized to pixel disparity using the
-calibration's `fx` and baseline:
+A `bx_msgs/DepthImage` on `depth_topic` — an encoded metric depth map, decoded
+and reparametrized to pixel disparity using the calibration's `fx` and baseline.
+The decoded image type fixes the unit, so it is never guessed:
+
+| Decoded type | Unit | Where it comes from |
+| --- | --- | --- |
+| `16UC1` | millimetres | the `DepthImage` contract, a PNG, as `mine_centering` reads it |
+| `32FC1` | metres | a float metric payload; the live explore3d depth publishes one (an OpenEXR map) |
 
 ```
-d = fx * baseline_m / (raw_mm / 1000)
+d = fx * baseline_m / Z      with Z = raw_mm / 1000  (16UC1)
+                                  Z = value          (32FC1)
 ```
 
 That is the exact inverse of the reprojection the grasp stage already performs
 (`Z = -fx * baseline / d`), so the geometry is the one the disparity mode sees.
-`raw_mm == 0` (a hole), a value outside `depth_min_m`/`depth_max_m`, and
-non-finite samples all become `d = 0`, which is how an invalid stereo pixel
-already reads.
+Both payloads are one implementation: a millimetre sample and a metre sample
+differ only in the unit they arrive in, so they cannot drift apart. A zero, a
+negative, a non-finite value, one outside `depth_min_m`/`depth_max_m`, and a
+`raw_mm == 0` hole all become `d = 0`, which is how an invalid stereo pixel
+already reads. A frame that is *entirely* holes is logged rather than silently
+published, because that is also what a payload read in the wrong unit looks like.
 
 Run it without editing the YAML:
 
@@ -146,6 +160,15 @@ sensor-referenced even though pairing does not use them.
   1.0. The `focal_length` cross-check warns when the loaded `fx` disagrees with
   `DepthImage.focal_length` by more than 5%, naming `~native_width` — that
   warning is the symptom of getting this wrong.
+- **`DepthImage.focal_length` documents metres, and a producer may mean it.**
+  Where it holds fx in pixels the cross-check above is a useful independent read;
+  the live explore3d depth publishes a physical length there instead (`0.003`, a
+  sensor pitch), which is not the same quantity and would warn on every frame.
+  The check therefore only runs when the value is plausibly pixels (`>= 1.0`, and
+  any real focal length in pixels is at least tens); below that the node logs
+  that it is skipping the comparison rather than passing it silently. A skipped
+  check means a wrong `native_width`/`native_height` has no early symptom there,
+  so confirm the `fx` the node logs at startup.
 - **`fx` must be right even though the baseline cancels.** In `X = (x-cx)*B/d`
   and `Z = fx*B/d` the baseline cancels out of the geometry entirely, but `fx`
   and `cx` do not — and the voting stage also works in *disparity pixels*

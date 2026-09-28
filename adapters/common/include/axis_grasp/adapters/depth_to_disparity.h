@@ -60,6 +60,19 @@ Result<Image<float>> DepthToDisparity(const Image<std::uint16_t>& depth_mm,
                                       const DepthBand& band,
                                       std::size_t* hole_count = nullptr);
 
+// Convert a metric float depth image in metres. Same contract as the
+// millimetre overload, and the same conversion per sample.
+//
+// Two payload shapes reach the adapters. The bx_msgs contract is a 16UC1
+// millimetre map, but a producer can publish a float metric map instead -- the
+// live explore3d depth is an OpenEXR CV_32FC1 in metres. The decoded image type
+// decides which overload a caller uses, so the unit is never guessed: an
+// unsigned integer depth is millimetres by convention, a float depth is metres.
+Result<Image<float>> DepthToDisparity(const Image<float>& depth_m,
+                                      const CameraIntrinsics& intrinsics,
+                                      const DepthBand& band,
+                                      std::size_t* hole_count = nullptr);
+
 }  // namespace axis_grasp
 
 #endif  // AXIS_GRASP_ADAPTERS_DEPTH_TO_DISPARITY_H_

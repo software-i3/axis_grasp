@@ -124,6 +124,31 @@ axis_grasp::Result<axis_grasp::Image<std::uint8_t>> RasterizeDetectionContours(
       axis_grasp::ErrorCode::kEmptyRoi,
       "detection contours did not cover any pixel of the disparity frame");
 }
+
+// Convert a decoded depth payload to disparity. The OpenCV element type picks
+// the unit, so the two shapes cannot be confused: an unsigned 16-bit depth is
+// millimetres by convention -- the bx_msgs payload, a PNG -- while a float depth
+// is metres, which is what the live explore3d depth publishes (an OpenEXR map).
+// Guessing the unit from the values instead would be a 1000x scale error on
+// every range, and nothing downstream would complain.
+axis_grasp::Result<axis_grasp::Image<float>> ConvertDecodedDepth(
+    const cv::Mat& decoded, const axis_grasp::CameraIntrinsics& intrinsics,
+    const axis_grasp::DepthBand& band, std::size_t* hole_count) {
+  if (decoded.type() == CV_16UC1) {
+    axis_grasp::Image<std::uint16_t> depth_mm(decoded.rows, decoded.cols, 0);
+    for (int y = 0; y < decoded.rows; ++y) {
+      const std::uint16_t* row = decoded.ptr<std::uint16_t>(y);
+      for (int x = 0; x < decoded.cols; ++x) depth_mm(y, x) = row[x];
+    }
+    return axis_grasp::DepthToDisparity(depth_mm, intrinsics, band, hole_count);
+  }
+  axis_grasp::Image<float> depth_m(decoded.rows, decoded.cols, 0.0F);
+  for (int y = 0; y < decoded.rows; ++y) {
+    const float* row = decoded.ptr<float>(y);
+    for (int x = 0; x < decoded.cols; ++x) depth_m(y, x) = row[x];
+  }
+  return axis_grasp::DepthToDisparity(depth_m, intrinsics, band, hole_count);
+}
 #endif
 
 }  // namespace
@@ -277,13 +302,21 @@ axis_grasp::Status RosDataSource::LoadDepthIntrinsics(int width, int height,
             std::to_string(intrinsics.fx) +
             " baseline_m=" + std::to_string(intrinsics.baseline_m));
   }
-  // DepthImage.focal_length is fx in pixels despite documenting metres, as
-  // mine_centering measured: (W/2)/tan(hfov/2) reproduces it exactly. It is an
-  // independent read on the quantity the calibration file supplies, so a
-  // disagreement means one of the two is wrong. This is also what catches a
+  // DepthImage.focal_length is fx in pixels on the payloads where it is set at
+  // all -- mine_centering measured (W/2)/tan(hfov/2) reproducing it exactly --
+  // and it is an independent read on the quantity the calibration file supplies,
+  // so a disagreement means one of the two is wrong. This is also what catches a
   // wrong native_width/native_height, whose only other symptom is geometry that
   // is finite, plausible, and off by a scale factor.
-  if (focal_length > 0.0) {
+  //
+  // The field's own comment says metres, though, and a producer is free to mean
+  // it: the live explore3d depth publishes a physical length (0.003 m, a sensor
+  // pitch, not 0.003 px). Comparing that against a pixel focal length would warn
+  // on every frame about a value that is not the same quantity -- so compare only
+  // when the number is even plausibly pixels. Any real focal length in pixels is
+  // at least tens, so 1.0 separates the two readings with no ambiguity. Below it
+  // the check is skipped and said to be skipped, rather than silently passing.
+  if (focal_length >= 1.0) {
     const double ratio = intrinsics.fx / focal_length;
     if (std::fabs(ratio - 1.0) > 0.05) {
       ROS_WARN_STREAM(
@@ -294,6 +327,12 @@ axis_grasp::Status RosDataSource::LoadDepthIntrinsics(int width, int height,
              "~native_width/~native_height, otherwise one of the two is wrong "
              "and every range is scaled by it");
     }
+  } else if (focal_length > 0.0) {
+    ROS_INFO_STREAM(
+        "depth input: focal_length=" << focal_length
+        << " is a physical length, not a focal length in pixels (the live "
+           "explore3d depth publishes one), so it is not compared against "
+           "calibration fx=" << intrinsics.fx);
   }
   return axis_grasp::Status::Ok();
 }
@@ -305,11 +344,14 @@ void RosDataSource::OnDepth(const bx_msgs::DepthImageConstPtr& message) {
 
   if (message->depth_data.empty()) {
     ROS_WARN_THROTTLE(5.0,
-                      "depth_data is empty; expected a uint16 PNG in "
-                      "millimetres");
+                      "depth_data is empty; expected an encoded depth map "
+                      "(uint16 millimetres or float32 metres)");
     return;
   }
-  // PNG-encoded 16UC1, as mine_centering reads the same field.
+  // The field is an encoded depth map, and imdecode handles the shapes that
+  // appear in practice: the uint16-millimetre PNG mine_centering reads, and the
+  // float32-metre OpenEXR the live explore3d depth carries. The type gate below
+  // accepts both, and the element type then fixes the unit.
   const cv::Mat encoded(1, static_cast<int>(message->depth_data.size()), CV_8U,
                         const_cast<std::uint8_t*>(message->depth_data.data()));
   // A malformed payload is a per-message fault, not a permanent one: a
@@ -320,14 +362,15 @@ void RosDataSource::OnDepth(const bx_msgs::DepthImageConstPtr& message) {
   if (decoded.empty()) {
     ROS_WARN_THROTTLE(5.0,
                       "depth_data did not decode as an image (%zu bytes); "
-                      "expected a uint16 PNG in millimetres",
+                      "expected an encoded depth map (uint16 millimetres or "
+                      "float32 metres)",
                       message->depth_data.size());
     return;
   }
-  if (decoded.type() != CV_16UC1) {
+  if (decoded.type() != CV_16UC1 && decoded.type() != CV_32FC1) {
     ROS_WARN_THROTTLE(5.0,
-                      "depth PNG decoded to OpenCV type %d, expected 16UC1 "
-                      "(uint16 millimetres)",
+                      "depth payload decoded to OpenCV type %d, expected 16UC1 "
+                      "(uint16 millimetres) or 32FC1 (float32 metres)",
                       decoded.type());
     return;
   }
@@ -342,18 +385,11 @@ void RosDataSource::OnDepth(const bx_msgs::DepthImageConstPtr& message) {
     }
   }
 
-  axis_grasp::Image<std::uint16_t> depth_mm(decoded.rows, decoded.cols, 0);
-  for (int y = 0; y < decoded.rows; ++y) {
-    const std::uint16_t* row = decoded.ptr<std::uint16_t>(y);
-    for (int x = 0; x < decoded.cols; ++x) {
-      depth_mm(y, x) = row[x];
-    }
-  }
-
+  const std::size_t samples = decoded.total();
   std::size_t holes = 0;
   axis_grasp::Result<axis_grasp::Image<float>> converted =
-      axis_grasp::DepthToDisparity(depth_mm, *depth_intrinsics_,
-                                   depth_config_.band, &holes);
+      ConvertDecodedDepth(decoded, *depth_intrinsics_, depth_config_.band,
+                          &holes);
   if (!converted.ok()) {
     // Unreachable while LoadDepthIntrinsics validates the same inputs, but a
     // conversion error must not latch: the frame is simply skipped.
@@ -361,15 +397,16 @@ void RosDataSource::OnDepth(const bx_msgs::DepthImageConstPtr& message) {
                       converted.status().message.c_str());
     return;
   }
-  if (holes == depth_mm.size()) {
+  if (holes == samples) {
     ROS_WARN_THROTTLE(5.0,
                       "every sample of the depth frame is outside the writable "
                       "band [%f, %f] m or missing; check ~depth_min_m and "
-                      "~depth_max_m",
+                      "~depth_max_m (a frame that is entirely holes is also "
+                      "what a unit mismatch looks like)",
                       depth_config_.band.min_m, depth_config_.band.max_m);
-  } else if (holes * 4 > depth_mm.size()) {
+  } else if (holes * 4 > samples) {
     ROS_WARN_THROTTLE(5.0, "%zu of %zu depth samples are holes or out of band",
-                      holes, depth_mm.size());
+                      holes, samples);
   }
 
   disparity_ = std::move(converted).value();

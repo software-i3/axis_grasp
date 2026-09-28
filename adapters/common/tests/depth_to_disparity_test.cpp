@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "axis_grasp/adapters/depth_to_disparity.h"
@@ -168,6 +169,132 @@ TEST(DepthToDisparityTest, HoleCountIsOptional) {
   const CameraIntrinsics k = TestIntrinsics();
   Image<std::uint16_t> depth(1, 1, 0);
   EXPECT_TRUE(DepthToDisparity(depth, k, DepthBand()).ok());
+}
+
+// The metres overload is what a float metric payload uses -- the live explore3d
+// depth publishes CV_32FC1 metres rather than the bx_msgs uint16 millimetres. It
+// must reach the same conversion, not a parallel one that can drift.
+
+TEST(MetresDepthToDisparityTest, MatchesTheMillimetrePathSampleForSample) {
+  const CameraIntrinsics k = TestIntrinsics();
+  Image<std::uint16_t> mm(2, 3, 0);
+  mm(0, 0) = 3000;
+  mm(0, 1) = 0;  // hole
+  mm(0, 2) = 6000;
+  mm(1, 0) = 1000;
+  mm(1, 1) = 0;  // hole
+  mm(1, 2) = 3000;
+
+  Image<float> metres(2, 3, 0.0F);
+  metres(0, 0) = 3.0F;
+  metres(0, 1) = 0.0F;  // hole
+  metres(0, 2) = 6.0F;
+  metres(1, 0) = 1.0F;
+  metres(1, 1) = 0.0F;  // hole
+  metres(1, 2) = 3.0F;
+
+  std::size_t mm_holes = 0;
+  std::size_t m_holes = 0;
+  const Result<Image<float>> from_mm =
+      DepthToDisparity(mm, k, DepthBand(), &mm_holes);
+  const Result<Image<float>> from_m = DepthToDisparity(metres, k, DepthBand(),
+                                                       &m_holes);
+  ASSERT_TRUE(from_mm.ok()) << from_mm.status().message;
+  ASSERT_TRUE(from_m.ok()) << from_m.status().message;
+  ASSERT_EQ(from_m.value().size(), from_mm.value().size());
+  EXPECT_EQ(m_holes, mm_holes);
+  // Exact, not near: both paths hand the same double depth to the same
+  // conversion, so nothing about the unit change may perturb the result.
+  for (std::size_t i = 0; i < from_m.value().size(); ++i) {
+    EXPECT_FLOAT_EQ(from_m.value()[i], from_mm.value()[i]) << "sample " << i;
+  }
+}
+
+TEST(MetresDepthToDisparityTest, RoundTripsThroughThePipelineReprojection) {
+  const CameraIntrinsics k = TestIntrinsics();
+  for (const double depth_m : {0.05, 0.5, 1.0, 3.0, 12.75, 100.0}) {
+    Image<float> depth(1, 1, static_cast<float>(depth_m));
+    const Result<Image<float>> disparity = DepthToDisparity(depth, k, DepthBand());
+    ASSERT_TRUE(disparity.ok()) << "depth " << depth_m;
+    // No quantization stage on this path, so the round trip is exact to float
+    // precision rather than to a millimetre.
+    const double recovered = DepthFromDisparity(disparity.value()[0], k);
+    EXPECT_NEAR(recovered, depth_m, 1e-4 * depth_m) << "depth " << depth_m;
+  }
+}
+
+TEST(MetresDepthToDisparityTest, TreatsNonPositiveAndNonFiniteAsHoles) {
+  const CameraIntrinsics k = TestIntrinsics();
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  Image<float> depth(1, 5, 0.0F);
+  depth(0, 0) = 0.0F;   // no reading
+  depth(0, 1) = -1.0F;  // behind the camera
+  depth(0, 2) = nan;
+  depth(0, 3) = inf;
+  depth(0, 4) = 3.0F;  // the only live sample
+
+  std::size_t holes = 0;
+  const Result<Image<float>> disparity =
+      DepthToDisparity(depth, k, DepthBand(), &holes);
+  ASSERT_TRUE(disparity.ok()) << disparity.status().message;
+  for (int x = 0; x < 4; ++x) {
+    // A negative depth would otherwise convert to a negative disparity and a
+    // horizon behind the camera; the pipeline's filter and Sobel see this image
+    // before anything scrubs non-finite values.
+    EXPECT_TRUE(std::isfinite(disparity.value()(0, x)));
+    EXPECT_FLOAT_EQ(disparity.value()(0, x), 0.0F) << "sample " << x;
+  }
+  EXPECT_FLOAT_EQ(disparity.value()(0, 4), 12.2F);
+  EXPECT_EQ(holes, 4U);
+}
+
+TEST(MetresDepthToDisparityTest, RejectsSamplesOutsideTheBand) {
+  const CameraIntrinsics k = TestIntrinsics();
+  DepthBand band;
+  band.min_m = 0.25;
+  band.max_m = 5.0;
+  Image<float> depth(1, 4, 0.0F);
+  depth(0, 0) = 0.25F;  // endpoints are inclusive
+  depth(0, 1) = 5.0F;
+  depth(0, 2) = 0.249F;
+  depth(0, 3) = 5.001F;
+
+  std::size_t holes = 0;
+  const Result<Image<float>> disparity =
+      DepthToDisparity(depth, k, band, &holes);
+  ASSERT_TRUE(disparity.ok()) << disparity.status().message;
+  EXPECT_GT(disparity.value()(0, 0), 0.0F);
+  EXPECT_GT(disparity.value()(0, 1), 0.0F);
+  EXPECT_FLOAT_EQ(disparity.value()(0, 2), 0.0F);
+  EXPECT_FLOAT_EQ(disparity.value()(0, 3), 0.0F);
+  EXPECT_EQ(holes, 2U);
+}
+
+TEST(MetresDepthToDisparityTest, RejectsUnusableIntrinsicsAndEmptyImage) {
+  Image<float> depth(1, 1, 3.0F);
+  CameraIntrinsics no_fx = TestIntrinsics();
+  no_fx.fx = 0.0;
+  EXPECT_EQ(DepthToDisparity(depth, no_fx, DepthBand()).status().code,
+            ErrorCode::kInvalidArgument);
+
+  CameraIntrinsics no_baseline = TestIntrinsics();
+  no_baseline.baseline_m = 0.0;
+  EXPECT_EQ(DepthToDisparity(depth, no_baseline, DepthBand()).status().code,
+            ErrorCode::kInvalidArgument);
+
+  // An unusable band must be caught on this path too, not fall through to a
+  // loop that quietly rejects every sample.
+  DepthBand inverted;
+  inverted.min_m = 5.0;
+  inverted.max_m = 0.25;
+  EXPECT_EQ(DepthToDisparity(depth, TestIntrinsics(), inverted).status().code,
+            ErrorCode::kInvalidArgument);
+
+  EXPECT_EQ(DepthToDisparity(Image<float>(), TestIntrinsics(), DepthBand())
+                .status()
+                .code,
+            ErrorCode::kInvalidArgument);
 }
 
 }  // namespace

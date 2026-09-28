@@ -1,28 +1,33 @@
 # Which sensor produces the range image the voting stage runs on.
 #   disparity  a 32FC1/64FC1 pixel-disparity image on `disparity_topic`, used as
 #              published.
-#   depth      a bx_msgs/DepthImage uint16-millimetre depth map on
-#              `depth_topic`, converted to pixel disparity on arrival with
-#              d = fx * baseline / Z. Needs a build with bx_msgs
-#              (-DAXIS_GRASP_WITH_DETECTIONS=ON, the default). Both inputs
-#              encode the same geometry, so the voting and grasp stages are
-#              unchanged; what does change is the frame's resolution, which is
-#              now the depth image's.
-input_kind: disparity
+#   depth      a bx_msgs/DepthImage metric depth map on `depth_topic`,
+#              converted to pixel disparity on arrival with
+#              d = fx * baseline / Z. The payload is either a uint16 PNG in
+#              millimetres or a float32 map in metres; the decoded image type
+#              decides which, so the unit is never guessed. Needs a build with
+#              bx_msgs (-DAXIS_GRASP_WITH_DETECTIONS=ON, the default). Both
+#              inputs encode the same geometry, so the voting and grasp stages
+#              are unchanged; what does change is the frame's resolution, which
+#              is now the depth image's.
+input_kind: depth
 
-disparity_topic: /disparity
+disparity_topic: no
 # Only used when input_kind is `depth`. Exactly one of the two range topics is
 # subscribed.
-depth_topic: /ikan/camera/depth_data
+depth_topic: /ikan/explore3d/depth_image
 # bx_msgs/DepthImage carries no std_msgs/Header, so there is no frame id to
 # inherit. Empty keeps the "camera" fallback.
-depth_frame_id: ""
+depth_frame_id: "ikan/camera_link"
 # Depths outside this band are treated as holes, as a 0 mm sample already is.
 # The lower bound is the one that matters by default: a near-field sample
 # converts to a huge disparity and would vote as a large close object. The upper
 # bound rejects far-away readings whose disparity is at the noise floor. Note
 # that a uint16-millimetre payload tops out at 65.535 m, so the default 100 m
-# ceiling only ever takes effect if it is lowered.
+# ceiling only ever takes effect if it is lowered -- or if the payload is float
+# metres, where it is an ordinary range to exceed. Either way a frame that is
+# entirely holes is logged, which is also what a payload read in the wrong unit
+# looks like.
 depth_min_m: 0.05
 depth_max_m: 100.0
 
