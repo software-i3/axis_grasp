@@ -1,4 +1,3 @@
-```bash
 #!/usr/bin/env bash
 # Build axis_grasp using the bundled CMake >= 3.14 from tools/
 # without permanently modifying the calling shell's PATH.
@@ -47,4 +46,3 @@ echo
 cd "$REPO_ROOT"
 
 exec catkin build axis_grasp "$@"
-```
