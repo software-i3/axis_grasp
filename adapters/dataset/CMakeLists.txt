@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.14)
+# 3.10, not 3.14, so the vehicle's system CMake (3.10.2 on Ubuntu 18.04) can
+# configure this directory. Nothing in this file needs a newer policy version;
+# see docs/BUILD_AND_RUN.md section 8 for the audit.
+cmake_minimum_required(VERSION 3.10)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(axis_grasp_dataset_project LANGUAGES CXX)

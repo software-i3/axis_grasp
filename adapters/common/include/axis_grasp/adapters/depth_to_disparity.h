@@ -15,7 +15,8 @@ namespace axis_grasp {
 // paths can be tested against the same code.
 //
 // This is an exact reparametrization, not an approximation: reprojection is
-// standard stereo (Z = -fx * baseline / d), so d = fx * baseline / Z returns the
+// standard stereo in the standard optical frame (Z = fx * baseline / d, Z
+// positive in front of the camera), so d = fx * baseline / Z returns the
 // original depth exactly. The pipeline's voting and grasp-proposal stages see
 // the geometry they already expect; only the sensor that produced it differs.
 

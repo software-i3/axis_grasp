@@ -17,6 +17,16 @@ and `000101`. Each ran with cropping enabled and disabled for both strategies.
 The comparison covered pixel coordinates, 3D positions, quaternions, and every
 rotation-matrix element. Agreement was 100% on these samples, exceeding 98%.
 
+**The optical-frame change does not invalidate this harness.** It compares a
+cropped run against an uncropped run of the *same* build, and the convention
+change is a rotation about the camera origin: it preserves distances, and it acts
+on both sides of the comparison identically, so an equivalence that held before
+still holds. What does need re-baselining is a comparison against output *stored*
+before the change — an older CSV, a replayed bag, a recorded `/grasp_poses`. Map
+those onto the current convention with `y, z -> -y, -z` and rotation rows 1 and 2
+negated (a quaternion goes by the shuffle `(qx, qy, qz, qw) -> (qw, -qz, qy,
+-qx)`); `x` is unchanged. `|z|` is still the depth either side reported.
+
 The crop-equivalence harness used the established scalar reference image
 operators to isolate the crop transformation. Total times were 153-198 ms
 full-frame and 34-55 ms cropped. The delivered backend uses equivalent OpenCV

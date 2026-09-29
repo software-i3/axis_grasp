@@ -1,4 +1,7 @@
-cmake_minimum_required(VERSION 3.14)
+# 3.10, not 3.14, so the vehicle's system CMake (3.10.2 on Ubuntu 18.04) can
+# configure this directory. Nothing in this file needs a newer policy version;
+# see docs/BUILD_AND_RUN.md section 8 for the audit.
+cmake_minimum_required(VERSION 3.10)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   project(axis_grasp_adapter_common_project LANGUAGES CXX)
@@ -32,9 +35,20 @@ endif()
 if(BUILD_TESTING AND AXIS_GRASP_BUILD_TESTS)
   find_package(GTest QUIET)
   if(GTest_FOUND)
+    # CMake below 3.20 names the test main library GTest::Main; the
+    # GTest::gtest_main spelling only arrived in 3.20 (and in the config package
+    # Ubuntu ships from 20.04 on). Pick whichever exists so the tests link under
+    # the vehicle's CMake 3.10.2 as well as a modern CMake.
+    if(TARGET GTest::gtest_main)
+      set(AXIS_GRASP_GTEST_MAIN GTest::gtest_main)
+    elseif(TARGET GTest::Main)
+      set(AXIS_GRASP_GTEST_MAIN GTest::Main)
+    else()
+      set(AXIS_GRASP_GTEST_MAIN ${GTEST_BOTH_LIBRARIES})
+    endif()
     add_executable(axis_grasp_polygon_mask_tests tests/polygon_mask_test.cpp)
     target_link_libraries(axis_grasp_polygon_mask_tests
-      PRIVATE axis_grasp_adapter_common GTest::gtest_main
+      PRIVATE axis_grasp_adapter_common ${AXIS_GRASP_GTEST_MAIN}
     )
     include(GoogleTest)
     gtest_discover_tests(axis_grasp_polygon_mask_tests)
@@ -42,7 +56,7 @@ if(BUILD_TESTING AND AXIS_GRASP_BUILD_TESTS)
     add_executable(axis_grasp_depth_to_disparity_tests
       tests/depth_to_disparity_test.cpp)
     target_link_libraries(axis_grasp_depth_to_disparity_tests
-      PRIVATE axis_grasp_adapter_common GTest::gtest_main
+      PRIVATE axis_grasp_adapter_common ${AXIS_GRASP_GTEST_MAIN}
     )
     gtest_discover_tests(axis_grasp_depth_to_disparity_tests)
   else()

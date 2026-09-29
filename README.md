@@ -69,6 +69,28 @@ The production stereo baseline comes from that file and is not hard-coded.
 Exactly one range topic is subscribed, per `input_kind`; exactly one label source
 is active, per `label_source`. See [Range input](#range-input).
 
+### Pose frame
+
+Every published pose is in the camera's **standard optical frame**: `x` to the
+right, `y` downward, `z` forward, so the scene lies at `z > 0` and `z` *is* the
+depth in metres, `z = fx * baseline / d`. It is right-handed, and the rotation
+columns are the conventional gripper axes — column 0 the approach (pointing from
+the gripper into the surface, i.e. away from the camera), column 1 the jaw axis,
+column 2 the closing axis.
+
+`frame_id` is the range frame's own header when there is one, and
+`depth_frame_id` otherwise — `ikan/camera_link` by default. That is a robot
+*link* name rather than an `..._optical_frame`, and it is informational: nothing
+in the package resolves TF, so the numbers are the optical-frame coordinates of
+that link, not a transform into it.
+
+Earlier builds published the same cloud rotated 180° about `x` — identical `x`,
+negated `y` and `z`, so `z < 0` with `|z|` the depth. Stored output from those
+builds (CSVs, replayed bags, older validation baselines) maps onto the current
+convention by negating `y` and `z` and negating rotation rows 1 and 2; a
+quaternion goes by the shuffle `(qx, qy, qz, qw) -> (qw, -qz, qy, -qx)`, not by a
+sign flip. `core/tests/grasp_proposal_test.cpp` pins the convention directly.
+
 `config/default.yaml` sets `output_topic: /grasp_poses_by_pipeline`; the built-in
 fallback when the YAML is not loaded is `/grasp_poses`.
 
@@ -82,7 +104,13 @@ dropped, so the node publishes whether or not a label or detections topic is
 present. The node logs its interface at startup and per-stage timings for every
 processed frame.
 
-`scripts/` holds testing aids, not part of the pipeline. `detection_relay.py`
+`scripts/` holds testing aids, not part of the pipeline. `synthetic_label.py`
+needs no perception stack at all: it publishes a hard-coded box as the ROI, one
+label per range frame, defaulting to the same `input_kind` and range topic as
+`config/default.yaml` (`depth` on `/ikan/explore3d/depth_image`), so a bare
+`rosrun axis_grasp synthetic_label.py _x0:=308 _y0:=308 _x1:=521 _y1:=493` is
+enough on a standard build — see [Trying it without
+hardware](docs/BUILD_AND_RUN.md). `detection_relay.py`
 republishes a `/label` image as `DetectedInstances` so the `detections` source
 can be exercised without a live perception stack; `disparity_to_depth.py` goes
 the other way, republishing a `/disparity` image as a synthetic
@@ -123,7 +151,8 @@ d = fx * baseline_m / Z      with Z = raw_mm / 1000  (16UC1)
 ```
 
 That is the exact inverse of the reprojection the grasp stage already performs
-(`Z = -fx * baseline / d`), so the geometry is the one the disparity mode sees.
+(`Z = fx * baseline / d`, the standard optical `+Z`; see
+[Pose frame](#pose-frame)), so the geometry is the one the disparity mode sees.
 Both payloads are one implementation: a millimetre sample and a metre sample
 differ only in the unit they arrive in, so they cannot drift apart. A zero, a
 negative, a non-finite value, one outside `depth_min_m`/`depth_max_m`, and a

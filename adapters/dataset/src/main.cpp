@@ -53,7 +53,7 @@ void PrintHelp() {
       << "  --dense-spacing-px X         Dense centerline spacing (3.5)\n"
       << "  --edge-margin-px N           Invalid image-edge margin (6)\n"
       << "  --spacing-m X                Output pose spacing (0.005)\n"
-      << "  --approach-axis X Y Z        Camera method approach (0 0 -1)\n"
+      << "  --approach-axis X Y Z        Camera method approach (0 0 1)\n"
       << "  --postskel-dil N             SVD band half-width (2)\n"
       << "  --ransac-dist-m X            Plane inlier distance (0.005)\n"
       << "  --ransac-iters N             Plane RANSAC iterations (50)\n"

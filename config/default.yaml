@@ -12,7 +12,14 @@
 #              is now the depth image's.
 input_kind: depth
 
-disparity_topic: no
+# `disparity_topic` (only used when input_kind is `disparity`) is left unset so
+# the code default in src/node.cpp applies, which is `/disparity`. It used to be
+# written out as `disparity_topic: no`, which YAML parses as boolean false, not
+# the string "no" -- and a string parameter set to a boolean makes the node fall
+# back to its own default silently. So the line was a no-op that read like
+# configuration. Anyone setting it should quote a value starting with n or y
+# (`"no"`), or YAML turns it into a boolean again.
+
 # Only used when input_kind is `depth`. Exactly one of the two range topics is
 # subscribed.
 depth_topic: /ikan/explore3d/depth_image

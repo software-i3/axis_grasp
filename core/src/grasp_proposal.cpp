@@ -348,13 +348,27 @@ std::vector<Vec2d> EqualTargets(const std::vector<Vec3d>& positions,
   brackets.reserve(count);
   rotation_indices->reserve(count);
   for (int index = 0; index < count; ++index) {
-    const double target = count == 1
-                              ? 0.0
-                              : total * index / static_cast<double>(count - 1);
+    // Evenly spaced targets over [0, total]. Both endpoints are named instead of
+    // computed, because total * (count - 1) / (count - 1) does not always
+    // cancel, and a single ulp either way is visible here: above total the
+    // search below runs off the end of cumulative, and below it the final pose
+    // lands a hair short of the chain's own end instead of on it.
+    double target = 0.0;
+    if (count > 1 && index > 0) {
+      target = index == count - 1
+                   ? total
+                   : total * index / static_cast<double>(count - 1);
+    }
     const auto it = std::lower_bound(cumulative.begin(), cumulative.end(), target);
-    const std::size_t upper = static_cast<std::size_t>(
-        std::distance(cumulative.begin(), it));
-    rotation_indices->push_back(std::min(upper, positions.size() - 1));
+    // The targets stay within [0, total], so this lands inside the chain; the
+    // clamp keeps that invariant local, since an index at cumulative.size()
+    // would make both cumulative[upper] below and positions[lower + 1] in the
+    // caller read capacity the algorithm never wrote -- memory the pose would
+    // then follow instead of the geometry.
+    const std::size_t upper = std::min(
+        static_cast<std::size_t>(std::distance(cumulative.begin(), it)),
+        positions.size() - 1);
+    rotation_indices->push_back(upper);
     if (upper == 0) {
       brackets.push_back({0.0, 0.0});
     } else {
@@ -385,6 +399,19 @@ void ReorientChain(std::vector<Mat3d>* rotations) {
 
 }  // namespace
 
+// Standard optical frame: x to the right, y downward, z forward, so the scene
+// sits at z > 0 and |z| is the depth in metres (z = fx * baseline / disparity).
+// Every pose this package publishes copies these coordinates, so this function
+// is where the output convention is decided.
+//
+// This used to be the same cloud rotated 180 degrees about x ({x, -y, -z}),
+// which put the scene at z < 0. That form is the frame of the upstream RTP
+// reference sample (adapters/socket/reference/sample_dumping.cc), which
+// deliberately still writes it; it is not the pipeline's convention, and this
+// function must not be rotated back to match it.
+//
+// camera_approach_axis in config.h is expressed in *this* frame and has to move
+// with it -- see the note on that field.
 Image<Vec3d> ReprojectDisparity(const Image<float>& disparity,
                                const CameraIntrinsics& intrinsics) {
   Image<Vec3d> points(disparity.height(), disparity.width());
@@ -392,7 +419,7 @@ Image<Vec3d> ReprojectDisparity(const Image<float>& disparity,
     for (int x = 0; x < disparity.width(); ++x) {
       const double t = intrinsics.baseline_m / disparity(y, x);
       points(y, x) = {t * (x - intrinsics.cx),
-                      -t * (y - intrinsics.cy), -t * intrinsics.fx};
+                      t * (y - intrinsics.cy), t * intrinsics.fx};
     }
   }
   return points;

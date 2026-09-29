@@ -16,6 +16,13 @@
 //   NTP header (2 x int) + left RGB (W*H*3) + disparity (W*H*2, FP16)
 // If the server is configured to also send the right image, it is extracted from
 // extra payload bytes automatically.
+//
+// NOTE on the reprojection below. It writes z = -t * K.fx, i.e. z < 0 in front
+// of the camera -- the frame of the upstream RTP sample this file is copied
+// from, kept byte-for-byte on purpose. It is NOT the pipeline's convention:
+// axis_grasp::ReprojectDisparity builds the standard optical frame (x right, y
+// down, z forward, z > 0). This file is a frozen reference, not built by any
+// CMakeLists.txt, so the two disagreeing is intended. Do not "fix" it.
 
 #include <httplib.h>
 #include <uvgrtp/lib.hh>

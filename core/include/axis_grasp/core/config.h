@@ -53,7 +53,16 @@ struct GraspConfig {
   double dense_spacing_pixels = 3.5;
   int edge_margin_pixels = 6;
   double output_spacing_m = 0.005;
-  Vec3d camera_approach_axis{0.0, 0.0, -1.0};
+  // Approach direction for GraspStrategy::kCameraNormal, in the reprojected
+  // point cloud's frame. The field is the approach itself: ProposeGrasps
+  // negates it into a surface normal (-axis points back at the camera) and
+  // BuildGraspFrame negates the normal again, so the net approach is +axis.
+  //
+  // The cloud is standard optical (x right, y down, z forward; see
+  // ReprojectDisparity), so the camera looks along +Z and this is +Z. Nothing
+  // validates the sign: a wrong one yields a well-formed right-handed pose
+  // that approaches the surface from behind, with no error anywhere.
+  Vec3d camera_approach_axis{0.0, 0.0, 1.0};
   int post_skeleton_dilation_pixels = 2;
   double ransac_distance_m = 0.005;
   int ransac_iterations = 50;
